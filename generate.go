@@ -2,4 +2,4 @@
 
 package main
 
-//go:generate go run . -inpkg=./blktypes -outpkg=blocks -outdir=./blocks SuperBlock
+//go:generate go run . -inpkg=./input -outpkg=output -outdir=./output SuperBlock

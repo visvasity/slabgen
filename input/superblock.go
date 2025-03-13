@@ -1,6 +1,6 @@
 // Copyright (c) 2025 Visvasity LLC
 
-package blktypes
+package input
 
 import (
 	"crypto/md5"
