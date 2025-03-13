@@ -30,11 +30,11 @@ func (v StorageOptionsWriter) Reader() StorageOptions {
 }
 
 func (v StorageOptions) IsZero() bool {
-	return common.IsZero(v[:36])
+	return common.IsZero(v[:40])
 }
 
 func (v StorageOptionsWriter) SetZero() {
-	common.SetZero(v.BlockBytes()[:36])
+	common.SetZero(v.BlockBytes()[:40])
 }
 
 func (v StorageOptions) String() string {
@@ -52,6 +52,8 @@ func (v StorageOptions) String() string {
 	fmt.Fprintf(&sb, "MaxFreeLBAListBlockItems=%d", v.MaxFreeLBAListBlockItems())
 	fmt.Fprintf(&sb, " ")
 	fmt.Fprintf(&sb, "MaxNonDataLBAListBlockItems=%d", v.MaxNonDataLBAListBlockItems())
+	fmt.Fprintf(&sb, " ")
+	fmt.Fprintf(&sb, "MaxDBARegionListBlockItems=%d", v.MaxDBARegionListBlockItems())
 	fmt.Fprintf(&sb, " ")
 	fmt.Fprintf(&sb, "MaxFreeDataRegionListBlockItems=%d", v.MaxFreeDataRegionListBlockItems())
 	fmt.Fprintf(&sb, " ")
@@ -115,18 +117,26 @@ func (v StorageOptionsWriter) SetMaxNonDataLBAListBlockItems(x uint32) {
 	v.BlockBytes().SetUint32At(24, x)
 }
 
-func (v StorageOptions) MaxFreeDataRegionListBlockItems() uint32 {
+func (v StorageOptions) MaxDBARegionListBlockItems() uint32 {
 	return v.BlockBytes().Uint32At(28)
 }
 
-func (v StorageOptionsWriter) SetMaxFreeDataRegionListBlockItems(x uint32) {
+func (v StorageOptionsWriter) SetMaxDBARegionListBlockItems(x uint32) {
 	v.BlockBytes().SetUint32At(28, x)
 }
 
-func (v StorageOptions) MaxDeferredPBAListBlockItems() uint32 {
+func (v StorageOptions) MaxFreeDataRegionListBlockItems() uint32 {
 	return v.BlockBytes().Uint32At(32)
 }
 
-func (v StorageOptionsWriter) SetMaxDeferredPBAListBlockItems(x uint32) {
+func (v StorageOptionsWriter) SetMaxFreeDataRegionListBlockItems(x uint32) {
 	v.BlockBytes().SetUint32At(32, x)
+}
+
+func (v StorageOptions) MaxDeferredPBAListBlockItems() uint32 {
+	return v.BlockBytes().Uint32At(36)
+}
+
+func (v StorageOptionsWriter) SetMaxDeferredPBAListBlockItems(x uint32) {
+	v.BlockBytes().SetUint32At(36, x)
 }

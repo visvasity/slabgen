@@ -1372,6 +1372,30 @@ func (g *Generator) generateSliceRemoveMethod(sdata *StructData, findex int) err
 	g.P(typeName, "}")
 	g.P(typeName)
 
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerTypeName, ") Delete", fdata.Name, "Items(i, j int) {")
+	g.P(typeName, "  n := v.", fdata.Name, "Len()")
+	g.P(typeName, "  if i < 0 || i >= n {")
+	g.P(typeName, `    panic(fmt.Sprintf("first slice index %d is out of range [0:%d:%d]", i, v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap()))`)
+	g.P(typeName, "  }")
+	g.P(typeName, "  if j < 0 || j >= n {")
+	g.P(typeName, `    panic(fmt.Sprintf("second slice index %d is out of range [0:%d:%d]", i, v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap()))`)
+	g.P(typeName, "  }")
+	g.P(typeName, "  if j < i {")
+	g.P(typeName, `    panic(fmt.Sprintf("invalid slice indices %d < %d", j, i))`)
+	g.P(typeName, "  }")
+	g.P(typeName, "  if i == j {")
+	g.P(typeName, "    return")
+	g.P(typeName, "  }")
+	g.P(typeName, "  ioff := ", base, "+i*", fdata.ElementSize)
+	g.P(typeName, "  joff := ", base, "+j*", fdata.ElementSize)
+	g.P(typeName, "  end := ", base, "+n*", fdata.ElementSize)
+	g.P(typeName, "  copy(v.BlockBytes()[ioff:end], v.BlockBytes()[joff:end])")
+	g.P(typeName, "  common.SetZero(v.BlockBytes()[end-(joff-ioff):end])")
+	g.P(typeName, "  v.internalSet", fdata.Name, "Len(n-(j-i))")
+	g.P(typeName, "}")
+	g.P(typeName)
+
 	return nil
 }
 

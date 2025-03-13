@@ -5,45 +5,86 @@ package input
 import (
 	"crypto/md5"
 	"crypto/sha256"
+	"math"
 )
 
 type DBA uint64
 type LBA uint64
 type PBA uint64
 
-type LSN int64
-
 type ObjectID int64
+
+type LSN int64
 
 type BlockType uint16
 
 const (
-	ZeroBlockType                BlockType = 0
-	SuperBlockType               BlockType = 1
-	ObjectBlockType              BlockType = 8
-	RawFreePBAListBlockType      BlockType = 50
-	RawLBAMetadataBlockType      BlockType = 51
-	RawDeferredPBAQueueBlockType BlockType = 52
-	RawNonDataLBAListBlockType   BlockType = 53
-	RawFreeLBAListBlockType      BlockType = 54
-	RawFreeDBAListBlockType      BlockType = 55
-	RawFreeRegionListBlockType   BlockType = 56
-	RawObjectListBlockType       BlockType = 57
-	RawDBARegionListBlockType    BlockType = 58
+	ChecksumLen = 32
+	DeferredLSN = math.MaxInt64
+	InvalidPBA  = 0x0000_FFFF_FFFF_FFFF
+)
+
+const (
+	ZeroBlockType            BlockType = 0
+	SuperBlockType           BlockType = 1
+	ObjectBlockType          BlockType = 2
+	ObjectListBlockType      BlockType = 3
+	DBARegionListBlockType   BlockType = 4
+	FreeRegionListBlockType  BlockType = 5
+	FreeDBAListBlockType     BlockType = 6
+	FreePBAListBlockType     BlockType = 7
+	FreeLBAListBlockType     BlockType = 8
+	NonDataLBAListBlockType  BlockType = 9
+	LBAMetadataBlockType     BlockType = 10
+	DeferredPBAListBlockType BlockType = 11
 )
 
 type LinkedListType uint16
 
 const (
-	FreeDBAListType        LinkedListType = 0
-	FreePBAListType        LinkedListType = 1
-	FreeLBAListType        LinkedListType = 2
-	NonDataLBAListType     LinkedListType = 3
-	FreeDataRegionListType LinkedListType = 4
-	ObjectListType         LinkedListType = 5
-	DoubleBlocksListType   LinkedListType = 6
-	DBARegionListType      LinkedListType = 7
+	// Lists for SuperBlock.
+	ObjectListType     LinkedListType = 1
+	DBARegionListType  LinkedListType = 2
+	FreeRegionListType LinkedListType = 3
+
+	// Lists for Object blocks.
+	FreeDBAListType     LinkedListType = 4
+	FreePBAListType     LinkedListType = 5
+	FreeLBAListType     LinkedListType = 6
+	NonDataLBAListType  LinkedListType = 7
+	DeferredPBAListType LinkedListType = 8
 )
+
+const (
+	NonDataBlockFlag   = 0x1000
+	TemporaryBlockFlag = 0x2000
+)
+
+type FlagsPBA uint64
+
+func (v FlagsPBA) Flags() uint16 {
+	return uint16(v >> 48)
+}
+
+func (v FlagsPBA) PBA() PBA {
+	return PBA((v << 16) >> 16)
+}
+
+func (v FlagsPBA) WithFlags(flags uint16) FlagsPBA {
+	return (FlagsPBA(flags) << 48) | FlagsPBA(v.PBA())
+}
+
+func (v FlagsPBA) WithPBA(pba PBA) FlagsPBA {
+	return ((v >> 48) << 48) | FlagsPBA((pba<<16)>>16)
+}
+
+func (v FlagsPBA) IsTemporaryBlock() bool {
+	return v.Flags()&TemporaryBlockFlag != 0
+}
+
+func (v FlagsPBA) IsDataBlock() bool {
+	return v.Flags()&NonDataBlockFlag == 0
+}
 
 type BlockRange struct {
 	Block uint64
@@ -103,18 +144,19 @@ type StorageOptions struct {
 	MaxFreePBAListBlockItems        uint32
 	MaxFreeLBAListBlockItems        uint32
 	MaxNonDataLBAListBlockItems     uint32
+	MaxDBARegionListBlockItems      uint32
 	MaxFreeDataRegionListBlockItems uint32
 	MaxDeferredPBAListBlockItems    uint32
 }
 
 type ObjectOptions struct {
-	NumRootBlocks int8
+	NumRootBlocks uint8
 }
 
 type LBAMetadata struct {
-	CurrentPBA       PBA
+	PBAWithFlags     FlagsPBA
 	LastUpdateLSN    LSN
-	UserDataChecksum [32]byte
+	UserDataChecksum [ChecksumLen]byte
 }
 
 type ZeroBlock struct {
@@ -143,7 +185,7 @@ type SuperBlock struct {
 	JournalHeadOffset int64
 	JournalTailOffset int64
 
-	JournalRegionList []JournalRegion
+	JournalRegionSlice []JournalRegion
 }
 
 type ObjectBlock struct {
@@ -151,13 +193,17 @@ type ObjectBlock struct {
 
 	Options ObjectOptions
 
+	EndLBA LBA
+
 	FreeDBAList LinkedList
 	FreePBAList LinkedList
 	FreeLBAList LinkedList
 
+	NonDataLBAList LinkedList
+
 	DeferredPBAList LinkedList
 
-	DataRegionList []DataRegion
+	DataRegionSlice []DataRegion
 }
 
 type ObjectListBlock struct {
@@ -165,15 +211,15 @@ type ObjectListBlock struct {
 
 	NextDBA DBA
 
-	ObjectIDDataList []ObjectIDData
+	ObjectIDDataSlice []ObjectIDData
 }
 
 type LBAMetadataBlock struct {
 	Header BlockHeader
 
-	IncarnationID uint64
+	TempsIncarnationID uint64
 
-	MetadataList []LBAMetadata
+	MetadataSlice []LBAMetadata
 }
 
 type DBARegionListBlock struct {
@@ -181,7 +227,7 @@ type DBARegionListBlock struct {
 
 	NextDBA DBA
 
-	DBARegionList []Region
+	DBARegionSlice []Region
 }
 
 type FreeRegionListBlock struct {
@@ -189,7 +235,7 @@ type FreeRegionListBlock struct {
 
 	NextDBA DBA
 
-	FreeRegionList []Region
+	FreeRegionSlice []Region
 }
 
 type FreeDBAListBlock struct {
@@ -197,7 +243,7 @@ type FreeDBAListBlock struct {
 
 	NextDBA DBA
 
-	DBARangeList []BlockRange
+	DBARangeSlice []BlockRange
 }
 
 type FreePBAListBlock struct {
@@ -205,7 +251,7 @@ type FreePBAListBlock struct {
 
 	NextDBA DBA
 
-	PBARangeList []BlockRange
+	PBARangeSlice []BlockRange
 }
 
 type FreeLBAListBlock struct {
@@ -213,7 +259,7 @@ type FreeLBAListBlock struct {
 
 	NextDBA DBA
 
-	LBARangeList []BlockRange
+	LBARangeSlice []BlockRange
 }
 
 type NonDataLBAListBlock struct {
@@ -221,7 +267,7 @@ type NonDataLBAListBlock struct {
 
 	NextDBA DBA
 
-	LBAList []LBA
+	LBASlice []LBA
 }
 
 type DeferredPBAListBlock struct {
@@ -229,5 +275,5 @@ type DeferredPBAListBlock struct {
 
 	NextDBA DBA
 
-	PBAList []PBA
+	PBASlice []PBA
 }

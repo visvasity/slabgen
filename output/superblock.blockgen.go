@@ -63,12 +63,12 @@ func (v SuperBlock) String() string {
 	fmt.Fprintf(&sb, " ")
 	fmt.Fprintf(&sb, "JournalTailOffset=%d", v.JournalTailOffset())
 	fmt.Fprintf(&sb, " ")
-	fmt.Fprintf(&sb, "JournalRegionList=[:%d:%d]{", v.JournalRegionListLen(), v.JournalRegionListCap())
-	for i := 0; i < v.JournalRegionListLen(); i++ {
+	fmt.Fprintf(&sb, "JournalRegionSlice=[:%d:%d]{", v.JournalRegionSliceLen(), v.JournalRegionSliceCap())
+	for i := 0; i < v.JournalRegionSliceLen(); i++ {
 		if i == 0 {
-			fmt.Fprintf(&sb, "{%v}", v.JournalRegionListItemAt(i))
+			fmt.Fprintf(&sb, "{%v}", v.JournalRegionSliceItemAt(i))
 		} else {
-			fmt.Fprintf(&sb, " {%v}", v.JournalRegionListItemAt(i))
+			fmt.Fprintf(&sb, " {%v}", v.JournalRegionSliceItemAt(i))
 		}
 	}
 	fmt.Fprintf(&sb, "}")
@@ -139,43 +139,43 @@ func (v SuperBlockWriter) SetJournalTailOffset(x int64) {
 	v.BlockBytes().SetInt64At(216, x)
 }
 
-func (v SuperBlock) JournalRegionListLen() int {
+func (v SuperBlock) JournalRegionSliceLen() int {
 	return int(v.BlockBytes().Int64At(232))
 }
 
-func (v SuperBlock) JournalRegionListCap() int {
+func (v SuperBlock) JournalRegionSliceCap() int {
 	return int(v.BlockBytes().Int64At(240))
 }
 
-func (v SuperBlockWriter) internalSetJournalRegionListLen(x int) {
+func (v SuperBlockWriter) internalSetJournalRegionSliceLen(x int) {
 	v.BlockBytes().SetInt64At(232, int64(x))
 }
 
-func (v SuperBlockWriter) internalSetJournalRegionListCap(x int) {
+func (v SuperBlockWriter) internalSetJournalRegionSliceCap(x int) {
 	v.BlockBytes().SetInt64At(240, int64(x))
 }
 
-func (v SuperBlock) JournalRegionListItemAt(i int) JournalRegion {
-	if i < 0 || i >= v.JournalRegionListLen() {
-		panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.JournalRegionListLen(), v.JournalRegionListCap()))
+func (v SuperBlock) JournalRegionSliceItemAt(i int) JournalRegion {
+	if i < 0 || i >= v.JournalRegionSliceLen() {
+		panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.JournalRegionSliceLen(), v.JournalRegionSliceCap()))
 	}
 	return JournalRegion(v[248+i*24:])
 }
 
-func (v SuperBlockWriter) AppendJournalRegionList() JournalRegionWriter {
-	n := v.JournalRegionListLen()
-	if n == v.JournalRegionListCap() {
+func (v SuperBlockWriter) AppendJournalRegionSlice() JournalRegionWriter {
+	n := v.JournalRegionSliceLen()
+	if n == v.JournalRegionSliceCap() {
 		panic(fmt.Sprintf("slice is already full with %d items", n))
 	}
-	v.internalSetJournalRegionListLen(n + 1)
-	return v.JournalRegionListItemAt(n).Writer()
+	v.internalSetJournalRegionSliceLen(n + 1)
+	return v.JournalRegionSliceItemAt(n).Writer()
 }
 
-func (v SuperBlockWriter) CoalesceJournalRegionListFunc(merge func(w JournalRegionWriter, r JournalRegion) bool) int {
+func (v SuperBlockWriter) CoalesceJournalRegionSliceFunc(merge func(w JournalRegionWriter, r JournalRegion) bool) int {
 	nmerges := 0
-	for i := 0; i < v.JournalRegionListLen()-1; {
-		if merge(v.JournalRegionListItemAt(i).Writer(), v.JournalRegionListItemAt(i+1)) {
-			v.RemoveJournalRegionListItemAt(i + 1)
+	for i := 0; i < v.JournalRegionSliceLen()-1; {
+		if merge(v.JournalRegionSliceItemAt(i).Writer(), v.JournalRegionSliceItemAt(i+1)) {
+			v.RemoveJournalRegionSliceItemAt(i + 1)
 			nmerges++
 			continue
 		}
@@ -184,29 +184,51 @@ func (v SuperBlockWriter) CoalesceJournalRegionListFunc(merge func(w JournalRegi
 	return nmerges
 }
 
-func (v SuperBlockWriter) RemoveJournalRegionListItemAt(i int) {
-	n := v.JournalRegionListLen()
+func (v SuperBlockWriter) RemoveJournalRegionSliceItemAt(i int) {
+	n := v.JournalRegionSliceLen()
 	if i < 0 || i >= n {
-		panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.JournalRegionListLen(), v.JournalRegionListCap()))
+		panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.JournalRegionSliceLen(), v.JournalRegionSliceCap()))
 	}
 	beg := 248 + i*24
 	end := 248 + n*24
 	copy(v.BlockBytes()[beg:], v.BlockBytes()[beg+24:end])
 	common.SetZero(v.BlockBytes()[end-24 : end])
-	v.internalSetJournalRegionListLen(n - 1)
+	v.internalSetJournalRegionSliceLen(n - 1)
 }
 
-func (v SuperBlock) AllJournalRegionList() iter.Seq2[int, JournalRegion] {
+func (v SuperBlockWriter) DeleteJournalRegionSliceItems(i, j int) {
+	n := v.JournalRegionSliceLen()
+	if i < 0 || i >= n {
+		panic(fmt.Sprintf("first slice index %d is out of range [0:%d:%d]", i, v.JournalRegionSliceLen(), v.JournalRegionSliceCap()))
+	}
+	if j < 0 || j >= n {
+		panic(fmt.Sprintf("second slice index %d is out of range [0:%d:%d]", i, v.JournalRegionSliceLen(), v.JournalRegionSliceCap()))
+	}
+	if j < i {
+		panic(fmt.Sprintf("invalid slice indices %d < %d", j, i))
+	}
+	if i == j {
+		return
+	}
+	ioff := 248 + i*24
+	joff := 248 + j*24
+	end := 248 + n*24
+	copy(v.BlockBytes()[ioff:end], v.BlockBytes()[joff:end])
+	common.SetZero(v.BlockBytes()[end-(joff-ioff) : end])
+	v.internalSetJournalRegionSliceLen(n - (j - i))
+}
+
+func (v SuperBlock) AllJournalRegionSlice() iter.Seq2[int, JournalRegion] {
 	return func(yield func(int, JournalRegion) bool) {
-		for i := 0; i < v.JournalRegionListLen(); i++ {
-			if !yield(i, v.JournalRegionListItemAt(i)) {
+		for i := 0; i < v.JournalRegionSliceLen(); i++ {
+			if !yield(i, v.JournalRegionSliceItemAt(i)) {
 				return
 			}
 		}
 	}
 }
 
-func (v SuperBlockWriter) SwapJournalRegionListItems(i, j int) {
+func (v SuperBlockWriter) SwapJournalRegionSliceItems(i, j int) {
 	tmp := make([]byte, 24)
 	ioff := 248 + i*24
 	joff := 248 + j*24
@@ -215,20 +237,20 @@ func (v SuperBlockWriter) SwapJournalRegionListItems(i, j int) {
 	copy(v.BlockBytes()[joff:joff+24], tmp)
 }
 
-func (v SuperBlockWriter) SortJournalRegionListFunc(cmp func(a, b JournalRegion) int) {
+func (v SuperBlockWriter) SortJournalRegionSliceFunc(cmp func(a, b JournalRegion) int) {
 	helper := common.SortHelper{
-		LenFunc:     v.JournalRegionListLen,
-		SwapFunc:    v.SwapJournalRegionListItems,
-		CompareFunc: func(i, j int) int { return cmp(v.JournalRegionListItemAt(i), v.JournalRegionListItemAt(j)) },
+		LenFunc:     v.JournalRegionSliceLen,
+		SwapFunc:    v.SwapJournalRegionSliceItems,
+		CompareFunc: func(i, j int) int { return cmp(v.JournalRegionSliceItemAt(i), v.JournalRegionSliceItemAt(j)) },
 	}
 	sort.Sort(&helper)
 }
 
-func (v SuperBlock) FindJournalRegionListFunc(cmp func(x JournalRegion) int) (int, bool) {
-	return sort.Find(v.JournalRegionListLen(), func(i int) int { return cmp(v.JournalRegionListItemAt(i)) })
+func (v SuperBlock) FindJournalRegionSliceFunc(cmp func(x JournalRegion) int) (int, bool) {
+	return sort.Find(v.JournalRegionSliceLen(), func(i int) int { return cmp(v.JournalRegionSliceItemAt(i)) })
 }
 
-func SuperBlockJournalRegionListCapForNumBytes(nbytes int) int {
+func SuperBlockJournalRegionSliceCapForNumBytes(nbytes int) int {
 	return (nbytes - 248) / 24
 }
 
@@ -242,7 +264,7 @@ func NewSuperBlock(block []byte) SuperBlock {
 	v := SuperBlock(block)
 	// SuperBlock type has a slice field; we must set a cap on it.
 	n := (size - 248) / 24
-	v.Writer().internalSetJournalRegionListCap(n)
+	v.Writer().internalSetJournalRegionSliceCap(n)
 	return v
 }
 
@@ -254,10 +276,10 @@ func OpenSuperBlock(block []byte) (SuperBlock, error) {
 	v := SuperBlock(block)
 	// SuperBlock type has a slice field; validate it's len and cap.
 	n := (size - 248) / 24
-	if x := v.JournalRegionListCap(); x != n {
+	if x := v.JournalRegionSliceCap(); x != n {
 		return nil, fmt.Errorf("slice field cap must be %d, found %d", n, x)
 	}
-	if x := v.JournalRegionListLen(); x < 0 || x > n {
+	if x := v.JournalRegionSliceLen(); x < 0 || x > n {
 		return nil, fmt.Errorf("slice field len is %d, must be between [%d-%d)", x, 0, n)
 	}
 	return v, nil
