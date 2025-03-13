@@ -4,9 +4,8 @@ package blocks
 
 import (
 	"fmt"
-	"strings"
-
 	"github.com/visvasity/blockgen/common"
+	"strings"
 )
 
 // Reader type defines accessor methods for read-only access.

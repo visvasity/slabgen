@@ -1537,6 +1537,13 @@ func (g *Generator) generatePrintMethods(sdata *StructData) error {
 	typeName := sdata.StructName
 	readerTypeName := g.readerName(typeName)
 
+	if err := g.addImport(typeName, "", "strings"); err != nil {
+		return err
+	}
+	if err := g.addImport(typeName, "", "fmt"); err != nil {
+		return err
+	}
+
 	g.P(typeName)
 	g.P(typeName, "func (v ", readerTypeName, ") String() string {")
 	g.P(typeName, "  var sb strings.Builder")
