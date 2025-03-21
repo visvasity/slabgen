@@ -9,6 +9,7 @@ import (
 type (
 	BlockType = input.BlockType
 	DBA       = input.DBA
+	LBA       = input.LBA
 	LSN       = input.LSN
 	ObjectID  = input.ObjectID
 	PBA       = input.PBA

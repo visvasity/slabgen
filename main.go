@@ -191,11 +191,12 @@ func main() {
 		log.Fatal(err)
 	}
 	for _, t := range types {
-		if err := g.generate(t); err != nil {
+		tname, err := g.generate(t)
+		if err != nil {
 			log.Fatal(err)
 		}
 		// Generate New* and Open* methods only for top-level data types.
-		if err := g.generateNewAndOpenMethods(t); err != nil {
+		if err := g.generateNewAndOpenMethods(tname); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -419,10 +420,49 @@ var basicKindMap = map[string]types.BasicKind{
 	"uint64": types.Uint64,
 }
 
-func (g *Generator) checkUnderlyingType(v *types.Var, vtype, utype types.Type) error {
+func (g *Generator) checkFieldType(named *types.Named, s *types.Struct, v *types.Var) error {
+	vtype := v.Type()
+	log.Printf("checkFieldType: v=%v vtype=%T", v, vtype)
+
+	switch x := vtype.(type) {
+	default:
+		return fmt.Errorf("checkFieldType: field (%v) of type %T is not supported", v, vtype)
+
+	case *types.Basic:
+		if _, ok := fixedBasicTypeMap[x.Kind()]; !ok {
+			return fmt.Errorf("checkFieldType: basic field (%v) of type %T is not supported", v, vtype)
+		}
+
+	case *types.Struct:
+		if xxx := g.failedTypes.At(x); xxx != nil {
+			return fmt.Errorf("checkFieldType: underlying struct type (%v) is not supported", x)
+		}
+		ntype, ok := vtype.(*types.Named)
+		if !ok {
+			return fmt.Errorf("checkFieldType: anonymous/inline struct field types are not supported")
+		}
+		return g.checkType(ntype)
+
+	case *types.Named:
+	case *types.Array:
+		// TODO: Check and determine all array dimensions.
+	case *types.Slice:
+	}
+
+	if err := g.checkUnderlyingType(named, s, v); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *Generator) checkUnderlyingType(named *types.Named, s *types.Struct, v *types.Var) error {
+	vtype := v.Type()
+	utype := vtype.Underlying()
+
 	switch x := utype.(type) {
 	default:
-		return fmt.Errorf("field (%v) of type %T is not supported", v, vtype)
+		return fmt.Errorf("field (%v) of type %T is not supported", v, utype)
+
 	case *types.Basic:
 		if _, ok := fixedBasicTypeMap[x.Kind()]; !ok {
 			return fmt.Errorf("basic field (%v) of type %T is not supported", v, vtype)
@@ -441,7 +481,7 @@ func (g *Generator) checkUnderlyingType(v *types.Var, vtype, utype types.Type) e
 		if !ok {
 			return fmt.Errorf("array element type (%T) is not supported", x.Elem())
 		}
-		if err := g.checkType(ntype.Obj()); err != nil {
+		if err := g.checkType(ntype); err != nil {
 			return err
 		}
 		if _, ok := g.structsWithSlice[ntype.Obj().Id()]; ok {
@@ -455,7 +495,7 @@ func (g *Generator) checkUnderlyingType(v *types.Var, vtype, utype types.Type) e
 		if !ok {
 			return fmt.Errorf("anonymous/inline struct field types are not supported")
 		}
-		return g.checkType(ntype.Obj())
+		return g.checkType(ntype)
 	case *types.Slice:
 		if _, ok := x.Elem().(*types.Basic); ok {
 			return nil
@@ -465,9 +505,9 @@ func (g *Generator) checkUnderlyingType(v *types.Var, vtype, utype types.Type) e
 		}
 		ntype, ok := x.Elem().(*types.Named)
 		if !ok {
-			return fmt.Errorf("slice element type (%v) is not supported", x.Elem())
+			return fmt.Errorf("slice element type (%T) is not supported", x.Elem())
 		}
-		if err := g.checkType(ntype.Obj()); err != nil {
+		if err := g.checkType(ntype); err != nil {
 			return err
 		}
 		if _, ok := g.structsWithSlice[ntype.Obj().Id()]; ok {
@@ -477,10 +517,11 @@ func (g *Generator) checkUnderlyingType(v *types.Var, vtype, utype types.Type) e
 	return nil
 }
 
-func (g *Generator) checkType(typeName *types.TypeName) (status error) {
-	s, ok := typeName.Type().Underlying().(*types.Struct)
+func (g *Generator) checkType(named *types.Named) (status error) {
+	// Input type MUST be resolved to a struct type.
+	s, ok := named.Underlying().(*types.Struct)
 	if !ok {
-		return fmt.Errorf("input type (%v) is not a named struct type", typeName)
+		return fmt.Errorf("input type (%v) is not a named struct type", named)
 	}
 
 	if v := g.checkedTypes.At(s); v != nil {
@@ -503,35 +544,42 @@ func (g *Generator) checkType(typeName *types.TypeName) (status error) {
 		g.checkingTypes.Delete(s)
 	}()
 
+	// log.Printf("checkType: Named=%v Named.Obj=%v Named.Origin=%v Named.Underlying=%v", named, named.Obj(), named.Origin(), named.Underlying())
+
 	for i := 0; i < s.NumFields(); i++ {
 		v := s.Field(i)
 		if v.Anonymous() {
 			return fmt.Errorf("anonymous fields (%v) are not supported", v)
 		}
 
-		vtype := v.Type()
-		if _, ok := vtype.(*types.Slice); ok {
+		if _, ok := v.Type().Underlying().(*types.Slice); ok {
 			if i != s.NumFields()-1 {
 				return fmt.Errorf("slice field (%v) must be the last field of a struct", v)
 			}
-			g.structsWithSlice[typeName.Id()] = true
+			g.structsWithSlice[named.Obj().Id()] = true
 		}
 
-		if err := g.checkUnderlyingType(v, vtype, vtype.Underlying()); err != nil {
+		if err := g.checkFieldType(named, s, v); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (g *Generator) prepareStructData(tname *types.TypeName) (*StructData, error) {
-	skey := tname.Pkg().Path() + "." + tname.Name()
-	sdata := &StructData{StructName: tname.Name()}
-
-	stype, ok := tname.Type().Underlying().(*types.Struct)
-	if !ok {
-		return nil, fmt.Errorf("input type %q is not a struct", tname.Name())
+func (g *Generator) prepareStructData(localName string, named *types.Named) (*StructData, error) {
+	if len(localName) == 0 {
+		localName = named.Obj().Name()
 	}
+
+	skey := named.String()
+	sdata := &StructData{StructName: localName}
+
+	stype, ok := named.Underlying().(*types.Struct)
+	if !ok {
+		return nil, fmt.Errorf("input type (%v) is not a struct", named)
+	}
+
+	//log.Printf("prepareStructData: named.string=%q struct-name=%s type-args=%v", named.String(), sdata.StructName, named.TypeArgs())
 
 	var fs []*types.Var
 	for i := 0; i < stype.NumFields(); i++ {
@@ -614,21 +662,12 @@ func (g *Generator) prepareStructData(tname *types.TypeName) (*StructData, error
 }
 
 func (g *Generator) getStructData(typeName string) (*StructData, error) {
-	scope := g.pkg.Types.Scope()
-	object := scope.Lookup(typeName)
-	if object == nil {
-		return nil, fmt.Errorf("typename %q doesn't exist", typeName)
+	for _, v := range g.structDataMap {
+		if v.StructName == typeName {
+			return v, nil
+		}
 	}
-	tname, ok := object.(*types.TypeName)
-	if !ok {
-		return nil, fmt.Errorf("generator type %q is not a typename", typeName)
-	}
-	key := tname.Pkg().Path() + "." + tname.Name()
-	v, ok := g.structDataMap[key]
-	if !ok {
-		return nil, fmt.Errorf("could not find struct-data for %q", typeName)
-	}
-	return v, nil
+	return nil, fmt.Errorf("typename %q doesn't exist", typeName)
 }
 
 func (g *Generator) getStructFieldData(tname *types.TypeName, i int) (*FieldData, error) {
@@ -636,20 +675,88 @@ func (g *Generator) getStructFieldData(tname *types.TypeName, i int) (*FieldData
 	return g.structDataMap[key].FieldList[i], nil
 }
 
-func (g *Generator) generate(typeName string) error {
+var knownTypesMap = map[string]types.Type{
+	"int8":    types.Typ[types.Int8],
+	"int16":   types.Typ[types.Int16],
+	"int32":   types.Typ[types.Int32],
+	"int64":   types.Typ[types.Int64],
+	"uint8":   types.Typ[types.Uint8],
+	"uint16":  types.Typ[types.Uint16],
+	"uint32":  types.Typ[types.Uint32],
+	"uint64":  types.Typ[types.Uint64],
+	"float32": types.Typ[types.Float32],
+	"float64": types.Typ[types.Float64],
+}
+
+func (g *Generator) instantiateType(typeArg string) (string, *types.Named, error) {
 	scope := g.pkg.Types.Scope()
-	object := scope.Lookup(typeName)
-	if object == nil {
-		return fmt.Errorf("typename %q doesn't exist", typeName)
+	if !strings.ContainsRune(typeArg, '=') {
+		object := scope.Lookup(typeArg)
+		if object == nil {
+			return "", nil, fmt.Errorf("could not find type for type name arg %q", typeArg)
+		}
+		named, ok := object.Type().(*types.Named)
+		if !ok {
+			return "", nil, fmt.Errorf("type name arg %q is not a named type", typeArg)
+		}
+		return object.Name(), named, nil
 	}
-	tn, ok := object.(*types.TypeName)
+
+	typeName, a, _ := strings.Cut(typeArg, "=")
+	genericName, b, ok := strings.Cut(a, "[")
 	if !ok {
-		return fmt.Errorf("generator type %q is not a typename", typeName)
+		return "", nil, fmt.Errorf("could not find [ character in generic type arg %q", typeArg)
 	}
-	if err := g.checkType(tn); err != nil {
-		return err
+	c, _, ok := strings.Cut(b, "]")
+	if !ok {
+		return "", nil, fmt.Errorf("could not find ] character in generic type arg %q", typeArg)
 	}
-	s := tn.Type().Underlying().(*types.Struct)
+	typeArgs := strings.Split(c, ",")
+
+	origObj := scope.Lookup(genericName)
+	if origObj == nil {
+		return "", nil, fmt.Errorf("could not find generic type name %q", genericName)
+	}
+	orig, ok := origObj.(*types.TypeName)
+	if !ok {
+		return "", nil, fmt.Errorf("generic type name %q is not of a *types.TypeName type (%T)", genericName, origObj)
+	}
+
+	var targs []types.Type
+	for _, arg := range typeArgs {
+		if v, ok := knownTypesMap[arg]; ok {
+			targs = append(targs, v)
+			continue
+		}
+		obj := scope.Lookup(arg)
+		if obj == nil {
+			return "", nil, fmt.Errorf("could not find generic type argment %q in %q", arg, typeName)
+		}
+		targs = append(targs, obj.Type())
+	}
+
+	ftype, err := types.Instantiate(nil, orig.Type(), targs, true /* validate */)
+	if err != nil {
+		return "", nil, fmt.Errorf("could not instantiate generic type %q: %w", typeName, err)
+	}
+	named, ok := ftype.(*types.Named)
+	if !ok {
+		return "", nil, fmt.Errorf("type name arg %q is not a named type", typeArg)
+	}
+	knownTypesMap[typeName] = named
+	return typeName, named, nil
+}
+
+func (g *Generator) generate(typeArg string) (string, error) {
+	localName, named, err := g.instantiateType(typeArg)
+	if err != nil {
+		return "", err
+	}
+
+	if err := g.checkType(named); err != nil {
+		return "", err
+	}
+	s := named.Underlying().(*types.Struct)
 
 	// Generate code for all dependent struct types.
 	for i := 0; i < s.NumFields(); i++ {
@@ -662,8 +769,8 @@ func (g *Generator) generate(typeName string) error {
 					continue
 				}
 				if _, ok := x.Elem().Underlying().(*types.Struct); ok {
-					if err := g.generate(subName); err != nil {
-						return err
+					if _, err := g.generate(subName); err != nil {
+						return "", err
 					}
 				}
 			}
@@ -674,8 +781,8 @@ func (g *Generator) generate(typeName string) error {
 					continue
 				}
 				if _, ok := x.Elem().Underlying().(*types.Struct); ok {
-					if err := g.generate(subName); err != nil {
-						return err
+					if _, err := g.generate(subName); err != nil {
+						return "", err
 					}
 				}
 			}
@@ -685,113 +792,113 @@ func (g *Generator) generate(typeName string) error {
 				if _, ok := g.bufferMap[subName]; ok {
 					continue
 				}
-				if err := g.generate(subName); err != nil {
-					return err
+				if _, err := g.generate(subName); err != nil {
+					return "", err
 				}
 			}
 		}
 	}
 
 	// Populate the field data map for the struct.
-	sdata, err := g.prepareStructData(tn)
+	sdata, err := g.prepareStructData(localName, named)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if err := g.generateReaderWriterTypes(sdata.StructName); err != nil {
-		return err
+		return "", err
 	}
-	if err := g.generateReaderWriterMethods(sdata.StructName); err != nil {
-		return err
+	if err := g.generateReaderWriterMethods(sdata); err != nil {
+		return "", err
 	}
 	if err := g.generateZeroMethods(sdata); err != nil {
-		return err
+		return "", err
 	}
 	if err := g.generatePrintMethods(sdata); err != nil {
-		return err
+		return "", err
 	}
 	for i, fdata := range sdata.FieldList {
 		switch fdata.Kind {
 		case "struct":
 			if err := g.generateStructMethods(sdata, i); err != nil {
-				return err
+				return "", err
 			}
 
 		case "array":
 			if len(fdata.ElementKind) != 0 {
 				if len(fdata.TypeName) == 0 {
 					if err := g.generateBasicArrayMethods(sdata, i); err != nil {
-						return err
+						return "", err
 					}
 				} else {
 					if err := g.generateBasicNamedArrayMethods(sdata, i); err != nil {
-						return err
+						return "", err
 					}
 				}
 				if err := g.generateAssignArrayMethods(sdata, i); err != nil {
-					return err
+					return "", err
 				}
 				if err := g.generateCopyMethods(sdata, i); err != nil {
-					return err
+					return "", err
 				}
 			} else {
 				if err := g.generateNamedStructArrayMethods(sdata, i); err != nil {
-					return err
+					return "", err
 				}
 			}
 			if err := g.generateIteratorMethods(sdata, i); err != nil {
-				return err
+				return "", err
 			}
 			if err := g.generateSortAndFindMethods(sdata, i); err != nil {
-				return err
+				return "", err
 			}
 		case "slice":
 			if err := g.generateSliceMethods(sdata, i); err != nil {
-				return err
+				return "", err
 			}
 			if len(fdata.ElementKind) != 0 {
 				if len(fdata.TypeName) == 0 {
 					if err := g.generateBasicSliceMethods(sdata, i); err != nil {
-						return err
+						return "", err
 					}
 				} else {
 					if err := g.generateBasicNamedSliceMethods(sdata, i); err != nil {
-						return err
+						return "", err
 					}
 				}
 				if err := g.generateCopyMethods(sdata, i); err != nil {
-					return err
+					return "", err
 				}
 			} else {
 				if err := g.generateNamedStructSliceMethods(sdata, i); err != nil {
-					return err
+					return "", err
 				}
 				if err := g.generateCoalesceMethod(sdata, i); err != nil {
-					return err
+					return "", err
 				}
 			}
 			if err := g.generateSliceRemoveMethod(sdata, i); err != nil {
-				return err
+				return "", err
 			}
 			if err := g.generateIteratorMethods(sdata, i); err != nil {
-				return err
+				return "", err
 			}
 			if err := g.generateSortAndFindMethods(sdata, i); err != nil {
-				return err
+				return "", err
 			}
 		default: // Basic intX or uintX
 			if len(fdata.TypeName) == 0 {
 				if err := g.generateBasicMethods(sdata, i); err != nil {
-					return err
+					return "", err
 				}
 			} else {
 				if err := g.generateBasicNamedMethods(sdata, i); err != nil {
-					return err
+					return "", err
 				}
 			}
 		}
 	}
-	return nil
+	return localName, nil
 }
 
 func (g *Generator) getImports(typeName string) [][2]string {
@@ -855,7 +962,8 @@ func (g *Generator) generateReaderWriterTypes(typeName string) error {
 	return nil
 }
 
-func (g *Generator) generateReaderWriterMethods(typeName string) error {
+func (g *Generator) generateReaderWriterMethods(sdata *StructData) error {
+	typeName := sdata.StructName
 	readerTypeName := g.readerName(typeName)
 	writerTypeName := g.writerName(typeName)
 
