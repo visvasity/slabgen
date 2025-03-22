@@ -1,6 +1,6 @@
 // Copyright (c) 2025 Visvasity LLC
 
-package common
+package blockgen
 
 import "encoding/binary"
 

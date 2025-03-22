@@ -947,13 +947,13 @@ func (g *Generator) generateReaderWriterTypes(typeName string) error {
 	readerTypeName := g.readerName(typeName)
 	writerTypeName := g.writerName(typeName)
 
-	if err := g.addImport(typeName, "", "github.com/visvasity/blockgen/common"); err != nil {
+	if err := g.addImport(typeName, "", "github.com/visvasity/blockgen/blockgen"); err != nil {
 		return err
 	}
 
 	g.P(typeName)
 	g.P(typeName, "// Reader type defines accessor methods for read-only access.")
-	g.P(typeName, "type ", readerTypeName, " common.BlockBytes")
+	g.P(typeName, "type ", readerTypeName, " blockgen.BlockBytes")
 	g.P(typeName)
 	g.P(typeName, "// Writer type extends the reader with mutable methods.")
 	g.P(typeName, "type ", writerTypeName, " struct { ", readerTypeName, " }")
@@ -969,8 +969,8 @@ func (g *Generator) generateReaderWriterMethods(sdata *StructData) error {
 
 	g.P(typeName)
 	g.P(typeName, "// BlockBytes returns access to the underlying byte slice.")
-	g.P(typeName, "func (v ", readerTypeName, ") BlockBytes() common.BlockBytes {")
-	g.P(typeName, "  return common.BlockBytes(v)")
+	g.P(typeName, "func (v ", readerTypeName, ") BlockBytes() blockgen.BlockBytes {")
+	g.P(typeName, "  return blockgen.BlockBytes(v)")
 	g.P(typeName, "}")
 	g.P(typeName)
 
@@ -998,13 +998,13 @@ func (g *Generator) generateZeroMethods(sdata *StructData) error {
 
 	g.P(typeName)
 	g.P(typeName, "func (v ", readerTypeName, ") IsZero() bool {")
-	g.P(typeName, "  return common.IsZero(v[:", sdata.Size, "])")
+	g.P(typeName, "  return blockgen.IsZero(v[:", sdata.Size, "])")
 	g.P(typeName, "}")
 	g.P(typeName)
 
 	g.P(typeName)
 	g.P(typeName, "func (v ", writerTypeName, ") SetZero() {")
-	g.P(typeName, "  common.SetZero(v.BlockBytes()[:", sdata.Size, "])")
+	g.P(typeName, "  blockgen.SetZero(v.BlockBytes()[:", sdata.Size, "])")
 	g.P(typeName, "}")
 	g.P(typeName)
 	return nil
@@ -1037,7 +1037,7 @@ func (g *Generator) generateNewAndOpenMethods(typeName string) error {
 	g.P(typeName, "  if size < ", sdata.Size, " {")
 	g.P(typeName, "    return nil")
 	g.P(typeName, "  }")
-	g.P(typeName, "  common.SetZero(block)")
+	g.P(typeName, "  blockgen.SetZero(block)")
 	g.P(typeName, "  v := ", readerTypeName, "(block)")
 	if sdata.HasSliceField() {
 		fdata := sdata.FieldList[len(sdata.FieldList)-1]
@@ -1475,7 +1475,7 @@ func (g *Generator) generateSliceRemoveMethod(sdata *StructData, findex int) err
 	g.P(typeName, "  beg := ", base, "+i*", fdata.ElementSize)
 	g.P(typeName, "  end := ", base, "+n*", fdata.ElementSize)
 	g.P(typeName, "  copy(v.BlockBytes()[beg:], v.BlockBytes()[beg+", fdata.ElementSize, ":end])")
-	g.P(typeName, "  common.SetZero(v.BlockBytes()[end-", fdata.ElementSize, ":end])")
+	g.P(typeName, "  blockgen.SetZero(v.BlockBytes()[end-", fdata.ElementSize, ":end])")
 	g.P(typeName, "  v.internalSet", fdata.Name, "Len(n-1)")
 	g.P(typeName, "}")
 	g.P(typeName)
@@ -1499,7 +1499,7 @@ func (g *Generator) generateSliceRemoveMethod(sdata *StructData, findex int) err
 	g.P(typeName, "  joff := ", base, "+j*", fdata.ElementSize)
 	g.P(typeName, "  end := ", base, "+n*", fdata.ElementSize)
 	g.P(typeName, "  copy(v.BlockBytes()[ioff:end], v.BlockBytes()[joff:end])")
-	g.P(typeName, "  common.SetZero(v.BlockBytes()[end-(joff-ioff):end])")
+	g.P(typeName, "  blockgen.SetZero(v.BlockBytes()[end-(joff-ioff):end])")
 	g.P(typeName, "  v.internalSet", fdata.Name, "Len(n-(j-i))")
 	g.P(typeName, "}")
 	g.P(typeName)
@@ -1616,7 +1616,7 @@ func (g *Generator) generateSortAndFindMethods(sdata *StructData, findex int) er
 
 	g.P(typeName)
 	g.P(typeName, "func (v ", writerTypeName, ") Sort", fdata.Name, "Func(cmp func(a, b ", elementType, ") int) {")
-	g.P(typeName, "  helper := common.SortHelper{")
+	g.P(typeName, "  helper := blockgen.SortHelper{")
 	g.P(typeName, "    LenFunc: v.", fdata.Name, "Len,")
 	g.P(typeName, "    SwapFunc: v.Swap", fdata.Name, "Items,")
 	g.P(typeName, "    CompareFunc: func(i,j int)int{return cmp(v.", fdata.Name, "ItemAt(i), v.", fdata.Name, "ItemAt(j))},")

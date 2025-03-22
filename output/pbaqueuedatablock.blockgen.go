@@ -4,21 +4,21 @@ package output
 
 import (
 	"fmt"
-	"github.com/visvasity/blockgen/common"
+	"github.com/visvasity/blockgen/blockgen"
 	"iter"
 	"sort"
 	"strings"
 )
 
 // Reader type defines accessor methods for read-only access.
-type PBAQueueDataBlock common.BlockBytes
+type PBAQueueDataBlock blockgen.BlockBytes
 
 // Writer type extends the reader with mutable methods.
 type PBAQueueDataBlockWriter struct{ PBAQueueDataBlock }
 
 // BlockBytes returns access to the underlying byte slice.
-func (v PBAQueueDataBlock) BlockBytes() common.BlockBytes {
-	return common.BlockBytes(v)
+func (v PBAQueueDataBlock) BlockBytes() blockgen.BlockBytes {
+	return blockgen.BlockBytes(v)
 }
 
 // Writer returns the PBAQueueDataBlock writer for read-write access to it's fields.
@@ -32,11 +32,11 @@ func (v PBAQueueDataBlockWriter) Reader() PBAQueueDataBlock {
 }
 
 func (v PBAQueueDataBlock) IsZero() bool {
-	return common.IsZero(v[:40])
+	return blockgen.IsZero(v[:40])
 }
 
 func (v PBAQueueDataBlockWriter) SetZero() {
-	common.SetZero(v.BlockBytes()[:40])
+	blockgen.SetZero(v.BlockBytes()[:40])
 }
 
 func (v PBAQueueDataBlock) String() string {
@@ -134,7 +134,7 @@ func (v PBAQueueDataBlockWriter) RemoveValuesSliceItemAt(i int) {
 	beg := 40 + i*8
 	end := 40 + n*8
 	copy(v.BlockBytes()[beg:], v.BlockBytes()[beg+8:end])
-	common.SetZero(v.BlockBytes()[end-8 : end])
+	blockgen.SetZero(v.BlockBytes()[end-8 : end])
 	v.internalSetValuesSliceLen(n - 1)
 }
 
@@ -156,7 +156,7 @@ func (v PBAQueueDataBlockWriter) DeleteValuesSliceItems(i, j int) {
 	joff := 40 + j*8
 	end := 40 + n*8
 	copy(v.BlockBytes()[ioff:end], v.BlockBytes()[joff:end])
-	common.SetZero(v.BlockBytes()[end-(joff-ioff) : end])
+	blockgen.SetZero(v.BlockBytes()[end-(joff-ioff) : end])
 	v.internalSetValuesSliceLen(n - (j - i))
 }
 
@@ -180,7 +180,7 @@ func (v PBAQueueDataBlockWriter) SwapValuesSliceItems(i, j int) {
 }
 
 func (v PBAQueueDataBlockWriter) SortValuesSliceFunc(cmp func(a, b PBA) int) {
-	helper := common.SortHelper{
+	helper := blockgen.SortHelper{
 		LenFunc:     v.ValuesSliceLen,
 		SwapFunc:    v.SwapValuesSliceItems,
 		CompareFunc: func(i, j int) int { return cmp(v.ValuesSliceItemAt(i), v.ValuesSliceItemAt(j)) },
@@ -202,7 +202,7 @@ func NewPBAQueueDataBlock(block []byte) PBAQueueDataBlock {
 	if size < 40 {
 		return nil
 	}
-	common.SetZero(block)
+	blockgen.SetZero(block)
 	v := PBAQueueDataBlock(block)
 	// PBAQueueDataBlock type has a slice field; we must set a cap on it.
 	n := (size - 40) / 8

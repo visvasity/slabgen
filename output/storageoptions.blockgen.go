@@ -4,19 +4,19 @@ package output
 
 import (
 	"fmt"
-	"github.com/visvasity/blockgen/common"
+	"github.com/visvasity/blockgen/blockgen"
 	"strings"
 )
 
 // Reader type defines accessor methods for read-only access.
-type StorageOptions common.BlockBytes
+type StorageOptions blockgen.BlockBytes
 
 // Writer type extends the reader with mutable methods.
 type StorageOptionsWriter struct{ StorageOptions }
 
 // BlockBytes returns access to the underlying byte slice.
-func (v StorageOptions) BlockBytes() common.BlockBytes {
-	return common.BlockBytes(v)
+func (v StorageOptions) BlockBytes() blockgen.BlockBytes {
+	return blockgen.BlockBytes(v)
 }
 
 // Writer returns the StorageOptions writer for read-write access to it's fields.
@@ -30,11 +30,11 @@ func (v StorageOptionsWriter) Reader() StorageOptions {
 }
 
 func (v StorageOptions) IsZero() bool {
-	return common.IsZero(v[:40])
+	return blockgen.IsZero(v[:40])
 }
 
 func (v StorageOptionsWriter) SetZero() {
-	common.SetZero(v.BlockBytes()[:40])
+	blockgen.SetZero(v.BlockBytes()[:40])
 }
 
 func (v StorageOptions) String() string {

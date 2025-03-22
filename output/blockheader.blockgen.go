@@ -4,21 +4,21 @@ package output
 
 import (
 	"fmt"
-	"github.com/visvasity/blockgen/common"
+	"github.com/visvasity/blockgen/blockgen"
 	"iter"
 	"sort"
 	"strings"
 )
 
 // Reader type defines accessor methods for read-only access.
-type BlockHeader common.BlockBytes
+type BlockHeader blockgen.BlockBytes
 
 // Writer type extends the reader with mutable methods.
 type BlockHeaderWriter struct{ BlockHeader }
 
 // BlockBytes returns access to the underlying byte slice.
-func (v BlockHeader) BlockBytes() common.BlockBytes {
-	return common.BlockBytes(v)
+func (v BlockHeader) BlockBytes() blockgen.BlockBytes {
+	return blockgen.BlockBytes(v)
 }
 
 // Writer returns the BlockHeader writer for read-write access to it's fields.
@@ -32,11 +32,11 @@ func (v BlockHeaderWriter) Reader() BlockHeader {
 }
 
 func (v BlockHeader) IsZero() bool {
-	return common.IsZero(v[:48])
+	return blockgen.IsZero(v[:48])
 }
 
 func (v BlockHeaderWriter) SetZero() {
-	common.SetZero(v.BlockBytes()[:48])
+	blockgen.SetZero(v.BlockBytes()[:48])
 }
 
 func (v BlockHeader) String() string {
@@ -115,7 +115,7 @@ func (v BlockHeaderWriter) SwapChecksumItems(i, j int) {
 }
 
 func (v BlockHeaderWriter) SortChecksumFunc(cmp func(a, b uint8) int) {
-	helper := common.SortHelper{
+	helper := blockgen.SortHelper{
 		LenFunc:     v.ChecksumLen,
 		SwapFunc:    v.SwapChecksumItems,
 		CompareFunc: func(i, j int) int { return cmp(v.ChecksumItemAt(i), v.ChecksumItemAt(j)) },

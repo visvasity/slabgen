@@ -10,7 +10,7 @@ all:
 	$(GO) build ./input
 	$(GO) run . -inpkg=./input -outpkg=output -outdir=./output SuperBlock PBAQueueDataBlock=QueueDataBlock[PBA] RegionQueueDataBlock=QueueDataBlock[Region]
 	# goimports -w ./output/*.go || true
-	$(GO) build ./...
+	$(GO) build ./output
 	$(GO)	test -fullpath -failfast -count=1 -coverprofile=coverage.out $(GOTESTFLAGS) -v ./...
 	$(GO) tool cover -html=coverage.out -o coverage.html
 

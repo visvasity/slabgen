@@ -4,19 +4,19 @@ package output
 
 import (
 	"fmt"
-	"github.com/visvasity/blockgen/common"
+	"github.com/visvasity/blockgen/blockgen"
 	"strings"
 )
 
 // Reader type defines accessor methods for read-only access.
-type LinkedList common.BlockBytes
+type LinkedList blockgen.BlockBytes
 
 // Writer type extends the reader with mutable methods.
 type LinkedListWriter struct{ LinkedList }
 
 // BlockBytes returns access to the underlying byte slice.
-func (v LinkedList) BlockBytes() common.BlockBytes {
-	return common.BlockBytes(v)
+func (v LinkedList) BlockBytes() blockgen.BlockBytes {
+	return blockgen.BlockBytes(v)
 }
 
 // Writer returns the LinkedList writer for read-write access to it's fields.
@@ -30,11 +30,11 @@ func (v LinkedListWriter) Reader() LinkedList {
 }
 
 func (v LinkedList) IsZero() bool {
-	return common.IsZero(v[:24])
+	return blockgen.IsZero(v[:24])
 }
 
 func (v LinkedListWriter) SetZero() {
-	common.SetZero(v.BlockBytes()[:24])
+	blockgen.SetZero(v.BlockBytes()[:24])
 }
 
 func (v LinkedList) String() string {

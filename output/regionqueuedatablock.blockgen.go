@@ -4,21 +4,21 @@ package output
 
 import (
 	"fmt"
-	"github.com/visvasity/blockgen/common"
+	"github.com/visvasity/blockgen/blockgen"
 	"iter"
 	"sort"
 	"strings"
 )
 
 // Reader type defines accessor methods for read-only access.
-type RegionQueueDataBlock common.BlockBytes
+type RegionQueueDataBlock blockgen.BlockBytes
 
 // Writer type extends the reader with mutable methods.
 type RegionQueueDataBlockWriter struct{ RegionQueueDataBlock }
 
 // BlockBytes returns access to the underlying byte slice.
-func (v RegionQueueDataBlock) BlockBytes() common.BlockBytes {
-	return common.BlockBytes(v)
+func (v RegionQueueDataBlock) BlockBytes() blockgen.BlockBytes {
+	return blockgen.BlockBytes(v)
 }
 
 // Writer returns the RegionQueueDataBlock writer for read-write access to it's fields.
@@ -32,11 +32,11 @@ func (v RegionQueueDataBlockWriter) Reader() RegionQueueDataBlock {
 }
 
 func (v RegionQueueDataBlock) IsZero() bool {
-	return common.IsZero(v[:48])
+	return blockgen.IsZero(v[:48])
 }
 
 func (v RegionQueueDataBlockWriter) SetZero() {
-	common.SetZero(v.BlockBytes()[:48])
+	blockgen.SetZero(v.BlockBytes()[:48])
 }
 
 func (v RegionQueueDataBlock) String() string {
@@ -122,7 +122,7 @@ func (v RegionQueueDataBlockWriter) RemoveValuesSliceItemAt(i int) {
 	beg := 48 + i*16
 	end := 48 + n*16
 	copy(v.BlockBytes()[beg:], v.BlockBytes()[beg+16:end])
-	common.SetZero(v.BlockBytes()[end-16 : end])
+	blockgen.SetZero(v.BlockBytes()[end-16 : end])
 	v.internalSetValuesSliceLen(n - 1)
 }
 
@@ -144,7 +144,7 @@ func (v RegionQueueDataBlockWriter) DeleteValuesSliceItems(i, j int) {
 	joff := 48 + j*16
 	end := 48 + n*16
 	copy(v.BlockBytes()[ioff:end], v.BlockBytes()[joff:end])
-	common.SetZero(v.BlockBytes()[end-(joff-ioff) : end])
+	blockgen.SetZero(v.BlockBytes()[end-(joff-ioff) : end])
 	v.internalSetValuesSliceLen(n - (j - i))
 }
 
@@ -168,7 +168,7 @@ func (v RegionQueueDataBlockWriter) SwapValuesSliceItems(i, j int) {
 }
 
 func (v RegionQueueDataBlockWriter) SortValuesSliceFunc(cmp func(a, b Region) int) {
-	helper := common.SortHelper{
+	helper := blockgen.SortHelper{
 		LenFunc:     v.ValuesSliceLen,
 		SwapFunc:    v.SwapValuesSliceItems,
 		CompareFunc: func(i, j int) int { return cmp(v.ValuesSliceItemAt(i), v.ValuesSliceItemAt(j)) },
@@ -190,7 +190,7 @@ func NewRegionQueueDataBlock(block []byte) RegionQueueDataBlock {
 	if size < 48 {
 		return nil
 	}
-	common.SetZero(block)
+	blockgen.SetZero(block)
 	v := RegionQueueDataBlock(block)
 	// RegionQueueDataBlock type has a slice field; we must set a cap on it.
 	n := (size - 48) / 16

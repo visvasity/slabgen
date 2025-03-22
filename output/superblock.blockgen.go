@@ -4,21 +4,21 @@ package output
 
 import (
 	"fmt"
-	"github.com/visvasity/blockgen/common"
+	"github.com/visvasity/blockgen/blockgen"
 	"iter"
 	"sort"
 	"strings"
 )
 
 // Reader type defines accessor methods for read-only access.
-type SuperBlock common.BlockBytes
+type SuperBlock blockgen.BlockBytes
 
 // Writer type extends the reader with mutable methods.
 type SuperBlockWriter struct{ SuperBlock }
 
 // BlockBytes returns access to the underlying byte slice.
-func (v SuperBlock) BlockBytes() common.BlockBytes {
-	return common.BlockBytes(v)
+func (v SuperBlock) BlockBytes() blockgen.BlockBytes {
+	return blockgen.BlockBytes(v)
 }
 
 // Writer returns the SuperBlock writer for read-write access to it's fields.
@@ -32,11 +32,11 @@ func (v SuperBlockWriter) Reader() SuperBlock {
 }
 
 func (v SuperBlock) IsZero() bool {
-	return common.IsZero(v[:248])
+	return blockgen.IsZero(v[:248])
 }
 
 func (v SuperBlockWriter) SetZero() {
-	common.SetZero(v.BlockBytes()[:248])
+	blockgen.SetZero(v.BlockBytes()[:248])
 }
 
 func (v SuperBlock) String() string {
@@ -192,7 +192,7 @@ func (v SuperBlockWriter) RemoveJournalRegionSliceItemAt(i int) {
 	beg := 248 + i*24
 	end := 248 + n*24
 	copy(v.BlockBytes()[beg:], v.BlockBytes()[beg+24:end])
-	common.SetZero(v.BlockBytes()[end-24 : end])
+	blockgen.SetZero(v.BlockBytes()[end-24 : end])
 	v.internalSetJournalRegionSliceLen(n - 1)
 }
 
@@ -214,7 +214,7 @@ func (v SuperBlockWriter) DeleteJournalRegionSliceItems(i, j int) {
 	joff := 248 + j*24
 	end := 248 + n*24
 	copy(v.BlockBytes()[ioff:end], v.BlockBytes()[joff:end])
-	common.SetZero(v.BlockBytes()[end-(joff-ioff) : end])
+	blockgen.SetZero(v.BlockBytes()[end-(joff-ioff) : end])
 	v.internalSetJournalRegionSliceLen(n - (j - i))
 }
 
@@ -238,7 +238,7 @@ func (v SuperBlockWriter) SwapJournalRegionSliceItems(i, j int) {
 }
 
 func (v SuperBlockWriter) SortJournalRegionSliceFunc(cmp func(a, b JournalRegion) int) {
-	helper := common.SortHelper{
+	helper := blockgen.SortHelper{
 		LenFunc:     v.JournalRegionSliceLen,
 		SwapFunc:    v.SwapJournalRegionSliceItems,
 		CompareFunc: func(i, j int) int { return cmp(v.JournalRegionSliceItemAt(i), v.JournalRegionSliceItemAt(j)) },
@@ -260,7 +260,7 @@ func NewSuperBlock(block []byte) SuperBlock {
 	if size < 248 {
 		return nil
 	}
-	common.SetZero(block)
+	blockgen.SetZero(block)
 	v := SuperBlock(block)
 	// SuperBlock type has a slice field; we must set a cap on it.
 	n := (size - 248) / 24
