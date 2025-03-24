@@ -8,9 +8,13 @@ export GOTESTFLAGS ?=
 .PHONY: all
 all:
 	$(GO) build ./input
-	$(GO) run . -inpkg=./input -outpkg=output -outdir=./output SuperBlock PBAQueueDataBlock=QueueDataBlock[PBA] RegionQueueDataBlock=QueueDataBlock[Region]
-	# goimports -w ./output/*.go || true
+	rm -rf ./output/*.blockgen.go
+	$(GO) run . -inpkg=./input -outpkg=output -outdir=./output TestFinalSliceKind1 TestFinalSliceKind2 TestFinalSliceKind3 TestFinalSliceKind4 TestFinalSliceKind5 TestFinalSliceKind6 TestFinalSliceKind7 TestFinalSliceKind8
+	$(GO) run . -inpkg=./input -outpkg=output -outdir=./output TestGenericBlock TestPair TestMixedPair
+	$(GO) run . -inpkg=./input -outpkg=output -outdir=./output SuperBlock
+	$(GO) run . -inpkg=./input -outpkg=output -outdir=./output DataBlock
 	$(GO) build ./output
+	goimports -w ./output/*.go || true
 	$(GO)	test -fullpath -failfast -count=1 -coverprofile=coverage.out $(GOTESTFLAGS) -v ./...
 	$(GO) tool cover -html=coverage.out -o coverage.html
 

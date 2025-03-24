@@ -4,40 +4,47 @@ package output
 
 import (
 	"fmt"
-	"github.com/visvasity/blockgen/blockgen"
 	"strings"
+
+	"github.com/visvasity/blockgen/blockgen"
+	input "github.com/visvasity/blockgen/input"
 )
 
 // Reader type defines accessor methods for read-only access.
-type LinkedList blockgen.BlockBytes
+type LinkedListReader blockgen.BlockBytes
 
 // Writer type extends the reader with mutable methods.
-type LinkedListWriter struct{ LinkedList }
+type LinkedListWriter struct{ LinkedListReader }
+
+var structSizeOfLinkedList = blockgen.SizeFor[input.LinkedList]()
+var fieldOffsetsOfLinkedList = blockgen.OffsetsFor[input.LinkedList](nil)
 
 // BlockBytes returns access to the underlying byte slice.
-func (v LinkedList) BlockBytes() blockgen.BlockBytes {
+func (v LinkedListReader) BlockBytes() blockgen.BlockBytes {
 	return blockgen.BlockBytes(v)
 }
 
 // Writer returns the LinkedList writer for read-write access to it's fields.
-func (v LinkedList) Writer() LinkedListWriter {
+func (v LinkedListReader) Writer() LinkedListWriter {
 	return LinkedListWriter{v}
 }
 
 // Reader returns the LinkedList reader with read-only access to it's fields.
-func (v LinkedListWriter) Reader() LinkedList {
-	return v.LinkedList
+func (v LinkedListWriter) Reader() LinkedListReader {
+	return v.LinkedListReader
 }
 
-func (v LinkedList) IsZero() bool {
-	return blockgen.IsZero(v[:24])
+// IsZero returns true if all underlying bytes are zero.
+func (v LinkedListReader) IsZero() bool {
+	return blockgen.IsZero(v[:structSizeOfLinkedList])
 }
 
+// SetZero sets all underlying bytes to zero.
 func (v LinkedListWriter) SetZero() {
-	blockgen.SetZero(v.BlockBytes()[:24])
+	blockgen.SetZero(v.BlockBytes()[:structSizeOfLinkedList])
 }
 
-func (v LinkedList) String() string {
+func (v LinkedListReader) String() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "HeadDBA=%d", v.HeadDBA())
 	fmt.Fprintf(&sb, " ")
@@ -49,34 +56,56 @@ func (v LinkedList) String() string {
 	return sb.String()
 }
 
-func (v LinkedList) HeadDBA() DBA {
-	return DBA(v.BlockBytes().Uint64At(0))
+func (v LinkedListReader) CopyTo(x *input.LinkedList) {
+	x.HeadDBA = v.HeadDBA()
+	x.NumValues = v.NumValues()
+	x.NumLinkBlocks = v.NumLinkBlocks()
+	x.NumFreeItems = v.NumFreeItems()
 }
 
-func (v LinkedListWriter) SetHeadDBA(x DBA) {
-	v.BlockBytes().SetUint64At(0, uint64(x))
+func (v LinkedListWriter) CopyFrom(x *input.LinkedList) {
+	v.SetHeadDBA(x.HeadDBA)
+	v.SetNumValues(x.NumValues)
+	v.SetNumLinkBlocks(x.NumLinkBlocks)
+	v.SetNumFreeItems(x.NumFreeItems)
 }
 
-func (v LinkedList) NumValues() int64 {
-	return v.BlockBytes().Int64At(8)
+func (v LinkedListReader) HeadDBA() input.DBA {
+	var offset = fieldOffsetsOfLinkedList[0]
+	return input.DBA(v.BlockBytes().Uint64At(offset))
+}
+
+func (v LinkedListWriter) SetHeadDBA(x input.DBA) {
+	var offset = fieldOffsetsOfLinkedList[0]
+	v.BlockBytes().SetUint64At(offset, uint64(x))
+}
+
+func (v LinkedListReader) NumValues() int64 {
+	var offset = fieldOffsetsOfLinkedList[1]
+	return int64(v.BlockBytes().Int64At(offset))
 }
 
 func (v LinkedListWriter) SetNumValues(x int64) {
-	v.BlockBytes().SetInt64At(8, x)
+	var offset = fieldOffsetsOfLinkedList[1]
+	v.BlockBytes().SetInt64At(offset, int64(x))
 }
 
-func (v LinkedList) NumLinkBlocks() int32 {
-	return v.BlockBytes().Int32At(16)
+func (v LinkedListReader) NumLinkBlocks() int32 {
+	var offset = fieldOffsetsOfLinkedList[2]
+	return int32(v.BlockBytes().Int32At(offset))
 }
 
 func (v LinkedListWriter) SetNumLinkBlocks(x int32) {
-	v.BlockBytes().SetInt32At(16, x)
+	var offset = fieldOffsetsOfLinkedList[2]
+	v.BlockBytes().SetInt32At(offset, int32(x))
 }
 
-func (v LinkedList) NumFreeItems() int32 {
-	return v.BlockBytes().Int32At(20)
+func (v LinkedListReader) NumFreeItems() int32 {
+	var offset = fieldOffsetsOfLinkedList[3]
+	return int32(v.BlockBytes().Int32At(offset))
 }
 
 func (v LinkedListWriter) SetNumFreeItems(x int32) {
-	v.BlockBytes().SetInt32At(20, x)
+	var offset = fieldOffsetsOfLinkedList[3]
+	v.BlockBytes().SetInt32At(offset, int32(x))
 }

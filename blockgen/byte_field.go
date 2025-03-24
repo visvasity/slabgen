@@ -2,7 +2,10 @@
 
 package blockgen
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
 type BlockBytes []byte
 
@@ -103,4 +106,36 @@ func (v BlockBytes) ByteSliceAt(offset int, size int) []byte {
 
 func (v BlockBytes) SetByteSliceAt(offset int, bs []byte) {
 	copy(v[offset:offset+len(bs)], bs)
+}
+
+func IntAt(v BlockBytes, offset int) int {
+	switch SizeOfInt {
+	case 8:
+		return int(v.Int64At(offset))
+	case 4:
+		return int(v.Int32At(offset))
+	case 2:
+		return int(v.Int16At(offset))
+	case 1:
+		return int(v.Int8At(offset))
+	}
+	panic(fmt.Sprintf("IntAt: unhandled int size %d", SizeOfInt))
+}
+
+func SetIntAt(v BlockBytes, offset int, x int) {
+	switch SizeOfInt {
+	case 8:
+		v.SetInt64At(offset, int64(x))
+		return
+	case 4:
+		v.SetInt32At(offset, int32(x))
+		return
+	case 2:
+		v.SetInt16At(offset, int16(x))
+		return
+	case 1:
+		v.SetInt8At(offset, int8(x))
+		return
+	}
+	panic(fmt.Sprintf("SetIntAt: unhandled int size %d", SizeOfInt))
 }

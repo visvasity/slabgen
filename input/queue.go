@@ -2,10 +2,21 @@
 
 package input
 
-type QueueDataBlock[T any] struct {
-	NextLBA LBA
+import (
+	"github.com/visvasity/blockgen/blockgen"
+	"github.com/visvasity/storage"
+)
 
-	TestNumericValue T
+type HeaderBlock struct {
+	FirstLBA storage.LBA
+	LastLBA  storage.LBA
+
+	ValueSize    int64
+	ValueSizeCap int64
+}
+
+type DataBlock[T blockgen.Struct] struct {
+	NextLBA storage.LBA
 
 	ValuesSlice []T
 }

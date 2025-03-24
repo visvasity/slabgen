@@ -4,42 +4,49 @@ package output
 
 import (
 	"fmt"
-	"github.com/visvasity/blockgen/blockgen"
-	"iter"
-	"sort"
 	"strings"
+
+	"github.com/visvasity/blockgen/blockgen"
+	input "github.com/visvasity/blockgen/input"
 )
 
 // Reader type defines accessor methods for read-only access.
-type SuperBlock blockgen.BlockBytes
+type SuperBlockReader blockgen.BlockBytes
 
 // Writer type extends the reader with mutable methods.
-type SuperBlockWriter struct{ SuperBlock }
+type SuperBlockWriter struct{ SuperBlockReader }
+
+var structSizeOfSuperBlock = blockgen.SizeFor[input.SuperBlock]()
+var fieldOffsetsOfSuperBlock = blockgen.OffsetsFor[input.SuperBlock](nil)
+var sliceDataAlignOfSuperBlock = blockgen.AlignFor[[]input.JournalRegion]()
+var sliceElemSizeOfSuperBlock = blockgen.ElemSizeFor[[]input.JournalRegion]()
 
 // BlockBytes returns access to the underlying byte slice.
-func (v SuperBlock) BlockBytes() blockgen.BlockBytes {
+func (v SuperBlockReader) BlockBytes() blockgen.BlockBytes {
 	return blockgen.BlockBytes(v)
 }
 
 // Writer returns the SuperBlock writer for read-write access to it's fields.
-func (v SuperBlock) Writer() SuperBlockWriter {
+func (v SuperBlockReader) Writer() SuperBlockWriter {
 	return SuperBlockWriter{v}
 }
 
 // Reader returns the SuperBlock reader with read-only access to it's fields.
-func (v SuperBlockWriter) Reader() SuperBlock {
-	return v.SuperBlock
+func (v SuperBlockWriter) Reader() SuperBlockReader {
+	return v.SuperBlockReader
 }
 
-func (v SuperBlock) IsZero() bool {
-	return blockgen.IsZero(v[:248])
+// IsZero returns true if all underlying bytes are zero.
+func (v SuperBlockReader) IsZero() bool {
+	return blockgen.IsZero(v[:structSizeOfSuperBlock])
 }
 
+// SetZero sets all underlying bytes to zero.
 func (v SuperBlockWriter) SetZero() {
-	blockgen.SetZero(v.BlockBytes()[:248])
+	blockgen.SetZero(v.BlockBytes()[:structSizeOfSuperBlock])
 }
 
-func (v SuperBlock) String() string {
+func (v SuperBlockReader) String() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Header={%v}", v.Header())
 	fmt.Fprintf(&sb, " ")
@@ -75,125 +82,168 @@ func (v SuperBlock) String() string {
 	return sb.String()
 }
 
-func (v SuperBlock) Header() BlockHeader {
-	return BlockHeader(v.BlockBytes()[0:])
+func (v SuperBlockReader) CopyTo(x *input.SuperBlock) {
+	v.Header().CopyTo(&x.Header)
+	v.Options().CopyTo(&x.Options)
+	x.EndPBA = v.EndPBA()
+	x.MaxObjectID = v.MaxObjectID()
+	v.DBARegionList().CopyTo(&x.DBARegionList)
+	v.ObjectList().CopyTo(&x.ObjectList)
+	v.FreeDBAList().CopyTo(&x.FreeDBAList)
+	v.FreeDataRegionList().CopyTo(&x.FreeDataRegionList)
+	x.SyncedCacheLSN = v.SyncedCacheLSN()
+	x.JournalHeadOffset = v.JournalHeadOffset()
+	x.JournalTailOffset = v.JournalTailOffset()
+	x.JournalRegionSlice = make([]input.JournalRegion, v.JournalRegionSliceLen())
+	for i := 0; i < v.JournalRegionSliceLen(); i++ {
+		v.JournalRegionSliceItemAt(i).CopyTo(&x.JournalRegionSlice[i])
+	}
 }
 
-func (v SuperBlock) Options() StorageOptions {
-	return StorageOptions(v.BlockBytes()[48:])
+func (v SuperBlockWriter) CopyFrom(x *input.SuperBlock) {
+	v.Header().Writer().CopyFrom(&x.Header)
+	v.Options().Writer().CopyFrom(&x.Options)
+	v.SetEndPBA(x.EndPBA)
+	v.SetMaxObjectID(x.MaxObjectID)
+	v.DBARegionList().Writer().CopyFrom(&x.DBARegionList)
+	v.ObjectList().Writer().CopyFrom(&x.ObjectList)
+	v.FreeDBAList().Writer().CopyFrom(&x.FreeDBAList)
+	v.FreeDataRegionList().Writer().CopyFrom(&x.FreeDataRegionList)
+	v.SetSyncedCacheLSN(x.SyncedCacheLSN)
+	v.SetJournalHeadOffset(x.JournalHeadOffset)
+	v.SetJournalTailOffset(x.JournalTailOffset)
+	v.ResizeJournalRegionSlice(len(x.JournalRegionSlice))
+	for i := 0; i < len(x.JournalRegionSlice); i++ {
+		v.JournalRegionSliceItemAt(i).Writer().CopyFrom(&x.JournalRegionSlice[i])
+	}
 }
 
-func (v SuperBlock) EndPBA() PBA {
-	return PBA(v.BlockBytes().Uint64At(88))
+func (v SuperBlockReader) Header() BlockHeaderReader {
+	var offset = fieldOffsetsOfSuperBlock[0]
+	return BlockHeaderReader(v.BlockBytes()[offset:])
 }
 
-func (v SuperBlockWriter) SetEndPBA(x PBA) {
-	v.BlockBytes().SetUint64At(88, uint64(x))
+func (v SuperBlockReader) Options() StorageOptionsReader {
+	var offset = fieldOffsetsOfSuperBlock[1]
+	return StorageOptionsReader(v.BlockBytes()[offset:])
 }
 
-func (v SuperBlock) MaxObjectID() ObjectID {
-	return ObjectID(v.BlockBytes().Int64At(96))
+func (v SuperBlockReader) EndPBA() input.PBA {
+	var offset = fieldOffsetsOfSuperBlock[2]
+	return input.PBA(v.BlockBytes().Uint64At(offset))
 }
 
-func (v SuperBlockWriter) SetMaxObjectID(x ObjectID) {
-	v.BlockBytes().SetInt64At(96, int64(x))
+func (v SuperBlockWriter) SetEndPBA(x input.PBA) {
+	var offset = fieldOffsetsOfSuperBlock[2]
+	v.BlockBytes().SetUint64At(offset, uint64(x))
 }
 
-func (v SuperBlock) DBARegionList() LinkedList {
-	return LinkedList(v.BlockBytes()[104:])
+func (v SuperBlockReader) MaxObjectID() input.ObjectID {
+	var offset = fieldOffsetsOfSuperBlock[3]
+	return input.ObjectID(v.BlockBytes().Int64At(offset))
 }
 
-func (v SuperBlock) ObjectList() LinkedList {
-	return LinkedList(v.BlockBytes()[128:])
+func (v SuperBlockWriter) SetMaxObjectID(x input.ObjectID) {
+	var offset = fieldOffsetsOfSuperBlock[3]
+	v.BlockBytes().SetInt64At(offset, int64(x))
 }
 
-func (v SuperBlock) FreeDBAList() LinkedList {
-	return LinkedList(v.BlockBytes()[152:])
+func (v SuperBlockReader) DBARegionList() LinkedListReader {
+	var offset = fieldOffsetsOfSuperBlock[4]
+	return LinkedListReader(v.BlockBytes()[offset:])
 }
 
-func (v SuperBlock) FreeDataRegionList() LinkedList {
-	return LinkedList(v.BlockBytes()[176:])
+func (v SuperBlockReader) ObjectList() LinkedListReader {
+	var offset = fieldOffsetsOfSuperBlock[5]
+	return LinkedListReader(v.BlockBytes()[offset:])
 }
 
-func (v SuperBlock) SyncedCacheLSN() LSN {
-	return LSN(v.BlockBytes().Int64At(200))
+func (v SuperBlockReader) FreeDBAList() LinkedListReader {
+	var offset = fieldOffsetsOfSuperBlock[6]
+	return LinkedListReader(v.BlockBytes()[offset:])
 }
 
-func (v SuperBlockWriter) SetSyncedCacheLSN(x LSN) {
-	v.BlockBytes().SetInt64At(200, int64(x))
+func (v SuperBlockReader) FreeDataRegionList() LinkedListReader {
+	var offset = fieldOffsetsOfSuperBlock[7]
+	return LinkedListReader(v.BlockBytes()[offset:])
 }
 
-func (v SuperBlock) JournalHeadOffset() int64 {
-	return v.BlockBytes().Int64At(208)
+func (v SuperBlockReader) SyncedCacheLSN() input.LSN {
+	var offset = fieldOffsetsOfSuperBlock[8]
+	return input.LSN(v.BlockBytes().Int64At(offset))
+}
+
+func (v SuperBlockWriter) SetSyncedCacheLSN(x input.LSN) {
+	var offset = fieldOffsetsOfSuperBlock[8]
+	v.BlockBytes().SetInt64At(offset, int64(x))
+}
+
+func (v SuperBlockReader) JournalHeadOffset() int64 {
+	var offset = fieldOffsetsOfSuperBlock[9]
+	return int64(v.BlockBytes().Int64At(offset))
 }
 
 func (v SuperBlockWriter) SetJournalHeadOffset(x int64) {
-	v.BlockBytes().SetInt64At(208, x)
+	var offset = fieldOffsetsOfSuperBlock[9]
+	v.BlockBytes().SetInt64At(offset, int64(x))
 }
 
-func (v SuperBlock) JournalTailOffset() int64 {
-	return v.BlockBytes().Int64At(216)
+func (v SuperBlockReader) JournalTailOffset() int64 {
+	var offset = fieldOffsetsOfSuperBlock[10]
+	return int64(v.BlockBytes().Int64At(offset))
 }
 
 func (v SuperBlockWriter) SetJournalTailOffset(x int64) {
-	v.BlockBytes().SetInt64At(216, x)
+	var offset = fieldOffsetsOfSuperBlock[10]
+	v.BlockBytes().SetInt64At(offset, int64(x))
 }
 
-func (v SuperBlock) JournalRegionSliceLen() int {
-	return int(v.BlockBytes().Int64At(232))
+// SuperBlockSliceFieldCap returns the slice field capacity for the given underlying byte slice size.
+func SuperBlockSliceFieldCap(nbytes int) int {
+	// TODO: We should also add the required alignment offset to the struct-size.
+	return (nbytes - structSizeOfSuperBlock) / sliceElemSizeOfSuperBlock
 }
 
-func (v SuperBlock) JournalRegionSliceCap() int {
-	return int(v.BlockBytes().Int64At(240))
+// JournalRegionSliceLen method returns number of elements in the slice field.
+func (v SuperBlockReader) JournalRegionSliceLen() int {
+	var offset = fieldOffsetsOfSuperBlock[11] + blockgen.OffsetOfSliceLen
+	return blockgen.IntAt(v.BlockBytes(), offset)
 }
 
 func (v SuperBlockWriter) internalSetJournalRegionSliceLen(x int) {
-	v.BlockBytes().SetInt64At(232, int64(x))
+	var offset = fieldOffsetsOfSuperBlock[11] + blockgen.OffsetOfSliceLen
+	blockgen.SetIntAt(v.BlockBytes(), offset, x)
+}
+
+// JournalRegionSliceCap method returns maximum number of elements for the slice field.
+func (v SuperBlockReader) JournalRegionSliceCap() int {
+	var offset = fieldOffsetsOfSuperBlock[11] + blockgen.OffsetOfSliceCap
+	return blockgen.IntAt(v.BlockBytes(), offset)
 }
 
 func (v SuperBlockWriter) internalSetJournalRegionSliceCap(x int) {
-	v.BlockBytes().SetInt64At(240, int64(x))
+	var offset = fieldOffsetsOfSuperBlock[11] + blockgen.OffsetOfSliceCap
+	blockgen.SetIntAt(v.BlockBytes(), offset, x)
 }
 
-func (v SuperBlock) JournalRegionSliceItemAt(i int) JournalRegion {
-	if i < 0 || i >= v.JournalRegionSliceLen() {
-		panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.JournalRegionSliceLen(), v.JournalRegionSliceCap()))
+func (v SuperBlockWriter) ResizeJournalRegionSlice(size int) int {
+	if cap := v.JournalRegionSliceCap(); size > cap {
+		size = cap
 	}
-	return JournalRegion(v[248+i*24:])
-}
-
-func (v SuperBlockWriter) AppendJournalRegionSlice() JournalRegionWriter {
 	n := v.JournalRegionSliceLen()
-	if n == v.JournalRegionSliceCap() {
-		panic(fmt.Sprintf("slice is already full with %d items", n))
+	if size == n {
+		return size
 	}
-	v.internalSetJournalRegionSliceLen(n + 1)
-	return v.JournalRegionSliceItemAt(n).Writer()
-}
-
-func (v SuperBlockWriter) CoalesceJournalRegionSliceFunc(merge func(w JournalRegionWriter, r JournalRegion) bool) int {
-	nmerges := 0
-	for i := 0; i < v.JournalRegionSliceLen()-1; {
-		if merge(v.JournalRegionSliceItemAt(i).Writer(), v.JournalRegionSliceItemAt(i+1)) {
-			v.RemoveJournalRegionSliceItemAt(i + 1)
-			nmerges++
-			continue
-		}
-		i++
+	if size < n {
+		v.DeleteJournalRegionSliceItems(size, n)
+		return size
 	}
-	return nmerges
-}
-
-func (v SuperBlockWriter) RemoveJournalRegionSliceItemAt(i int) {
-	n := v.JournalRegionSliceLen()
-	if i < 0 || i >= n {
-		panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.JournalRegionSliceLen(), v.JournalRegionSliceCap()))
-	}
-	beg := 248 + i*24
-	end := 248 + n*24
-	copy(v.BlockBytes()[beg:], v.BlockBytes()[beg+24:end])
-	blockgen.SetZero(v.BlockBytes()[end-24 : end])
-	v.internalSetJournalRegionSliceLen(n - 1)
+	v.internalSetJournalRegionSliceLen(size)
+	var elemSize = blockgen.ElemSizeFor[[]input.JournalRegion]()
+	var begin = structSizeOfSuperBlock + n*elemSize
+	var end = structSizeOfSuperBlock + size*elemSize
+	blockgen.SetZero(v.BlockBytes()[begin:end])
+	return size
 }
 
 func (v SuperBlockWriter) DeleteJournalRegionSliceItems(i, j int) {
@@ -210,72 +260,73 @@ func (v SuperBlockWriter) DeleteJournalRegionSliceItems(i, j int) {
 	if i == j {
 		return
 	}
-	ioff := 248 + i*24
-	joff := 248 + j*24
-	end := 248 + n*24
+	var elemSize = blockgen.ElemSizeFor[[]input.JournalRegion]()
+
+	ioff := structSizeOfSuperBlock + i*elemSize
+	joff := structSizeOfSuperBlock + j*elemSize
+	end := structSizeOfSuperBlock + n*elemSize
+
 	copy(v.BlockBytes()[ioff:end], v.BlockBytes()[joff:end])
 	blockgen.SetZero(v.BlockBytes()[end-(joff-ioff) : end])
 	v.internalSetJournalRegionSliceLen(n - (j - i))
 }
 
-func (v SuperBlock) AllJournalRegionSlice() iter.Seq2[int, JournalRegion] {
-	return func(yield func(int, JournalRegion) bool) {
-		for i := 0; i < v.JournalRegionSliceLen(); i++ {
-			if !yield(i, v.JournalRegionSliceItemAt(i)) {
-				return
-			}
-		}
+func (v SuperBlockReader) JournalRegionSliceItemAt(i int) JournalRegionReader {
+	if i < 0 || i >= v.JournalRegionSliceLen() {
+		panic(fmt.Sprintf("slice index %d is out of range [:%d:%d]", i, v.JournalRegionSliceLen(), v.JournalRegionSliceCap()))
+	}
+	var elemSize = blockgen.ElemSizeFor[[]input.JournalRegion]()
+	var offset = structSizeOfSuperBlock + i*elemSize
+	return JournalRegionReader(v.BlockBytes()[offset:])
+}
+
+func (v SuperBlockWriter) SetJournalRegionSliceItemAt(i int, x JournalRegionReader) {
+	if i < 0 || i >= v.JournalRegionSliceLen() {
+		panic(fmt.Sprintf("slice index %d is out of range [:%d:%d]", i, v.JournalRegionSliceLen(), v.JournalRegionSliceCap()))
+	}
+	var elemSize = blockgen.ElemSizeFor[[]input.JournalRegion]()
+	var offset = structSizeOfSuperBlock + i*elemSize
+	copy(v.BlockBytes()[offset:offset+elemSize], x.BlockBytes()[:elemSize])
+}
+
+func (v SuperBlockWriter) AppendJournalRegionSliceItem(x JournalRegionReader) {
+	n := v.JournalRegionSliceLen()
+	if n == v.JournalRegionSliceCap() {
+		panic(fmt.Sprintf("append to slice overflows the maximum capacity [::%d]", v.JournalRegionSliceCap()))
+	}
+	v.internalSetJournalRegionSliceLen(n + 1)
+	var elemSize = blockgen.ElemSizeFor[[]input.JournalRegion]()
+	var offset = structSizeOfSuperBlock + n*elemSize
+	if x == nil {
+		blockgen.SetZero(v.BlockBytes()[offset : offset+elemSize])
+	} else {
+		copy(v.BlockBytes()[offset:offset+elemSize], x.BlockBytes()[:elemSize])
 	}
 }
 
-func (v SuperBlockWriter) SwapJournalRegionSliceItems(i, j int) {
-	tmp := make([]byte, 24)
-	ioff := 248 + i*24
-	joff := 248 + j*24
-	copy(tmp, v.BlockBytes()[ioff:ioff+24])
-	copy(v.BlockBytes()[ioff:ioff+24], v.BlockBytes()[joff:joff+24])
-	copy(v.BlockBytes()[joff:joff+24], tmp)
-}
-
-func (v SuperBlockWriter) SortJournalRegionSliceFunc(cmp func(a, b JournalRegion) int) {
-	helper := blockgen.SortHelper{
-		LenFunc:     v.JournalRegionSliceLen,
-		SwapFunc:    v.SwapJournalRegionSliceItems,
-		CompareFunc: func(i, j int) int { return cmp(v.JournalRegionSliceItemAt(i), v.JournalRegionSliceItemAt(j)) },
-	}
-	sort.Sort(&helper)
-}
-
-func (v SuperBlock) FindJournalRegionSliceFunc(cmp func(x JournalRegion) int) (int, bool) {
-	return sort.Find(v.JournalRegionSliceLen(), func(i int) int { return cmp(v.JournalRegionSliceItemAt(i)) })
-}
-
-func SuperBlockJournalRegionSliceCapForNumBytes(nbytes int) int {
-	return (nbytes - 248) / 24
-}
-
-// NewSuperBlock creates a zero-initialized SuperBlock. Returns nil if input block size is too small.
-func NewSuperBlock(block []byte) SuperBlock {
+// NewSuperBlockReader creates a zero-initialized SuperBlock. Returns nil if input block size is too small.
+func NewSuperBlock(block []byte) SuperBlockReader {
 	size := len(block)
-	if size < 248 {
+	if size < structSizeOfSuperBlock {
 		return nil
 	}
 	blockgen.SetZero(block)
-	v := SuperBlock(block)
+	v := SuperBlockReader(block)
 	// SuperBlock type has a slice field; we must set a cap on it.
-	n := (size - 248) / 24
+	n := SuperBlockSliceFieldCap(size)
 	v.Writer().internalSetJournalRegionSliceCap(n)
 	return v
 }
 
-func OpenSuperBlock(block []byte) (SuperBlock, error) {
+// OpenSuperBlockReader parses and prepares an existing SuperBlock for read/write access.
+func OpenSuperBlock(block []byte) (SuperBlockReader, error) {
 	size := len(block)
-	if size < 248 {
+	if size < structSizeOfSuperBlock {
 		return nil, fmt.Errorf("input size is too small")
 	}
-	v := SuperBlock(block)
+	v := SuperBlockReader(block)
 	// SuperBlock type has a slice field; validate it's len and cap.
-	n := (size - 248) / 24
+	n := SuperBlockSliceFieldCap(size)
 	if x := v.JournalRegionSliceCap(); x != n {
 		return nil, fmt.Errorf("slice field cap must be %d, found %d", n, x)
 	}

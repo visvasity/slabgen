@@ -4,40 +4,47 @@ package output
 
 import (
 	"fmt"
-	"github.com/visvasity/blockgen/blockgen"
 	"strings"
+
+	"github.com/visvasity/blockgen/blockgen"
+	input "github.com/visvasity/blockgen/input"
 )
 
 // Reader type defines accessor methods for read-only access.
-type StorageOptions blockgen.BlockBytes
+type StorageOptionsReader blockgen.BlockBytes
 
 // Writer type extends the reader with mutable methods.
-type StorageOptionsWriter struct{ StorageOptions }
+type StorageOptionsWriter struct{ StorageOptionsReader }
+
+var structSizeOfStorageOptions = blockgen.SizeFor[input.StorageOptions]()
+var fieldOffsetsOfStorageOptions = blockgen.OffsetsFor[input.StorageOptions](nil)
 
 // BlockBytes returns access to the underlying byte slice.
-func (v StorageOptions) BlockBytes() blockgen.BlockBytes {
+func (v StorageOptionsReader) BlockBytes() blockgen.BlockBytes {
 	return blockgen.BlockBytes(v)
 }
 
 // Writer returns the StorageOptions writer for read-write access to it's fields.
-func (v StorageOptions) Writer() StorageOptionsWriter {
+func (v StorageOptionsReader) Writer() StorageOptionsWriter {
 	return StorageOptionsWriter{v}
 }
 
 // Reader returns the StorageOptions reader with read-only access to it's fields.
-func (v StorageOptionsWriter) Reader() StorageOptions {
-	return v.StorageOptions
+func (v StorageOptionsWriter) Reader() StorageOptionsReader {
+	return v.StorageOptionsReader
 }
 
-func (v StorageOptions) IsZero() bool {
-	return blockgen.IsZero(v[:40])
+// IsZero returns true if all underlying bytes are zero.
+func (v StorageOptionsReader) IsZero() bool {
+	return blockgen.IsZero(v[:structSizeOfStorageOptions])
 }
 
+// SetZero sets all underlying bytes to zero.
 func (v StorageOptionsWriter) SetZero() {
-	blockgen.SetZero(v.BlockBytes()[:40])
+	blockgen.SetZero(v.BlockBytes()[:structSizeOfStorageOptions])
 }
 
-func (v StorageOptions) String() string {
+func (v StorageOptionsReader) String() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "BlockSize=%d", v.BlockSize())
 	fmt.Fprintf(&sb, " ")
@@ -61,82 +68,128 @@ func (v StorageOptions) String() string {
 	return sb.String()
 }
 
-func (v StorageOptions) BlockSize() uint32 {
-	return v.BlockBytes().Uint32At(0)
+func (v StorageOptionsReader) CopyTo(x *input.StorageOptions) {
+	x.BlockSize = v.BlockSize()
+	x.MaxLBAMetadataBlockItems = v.MaxLBAMetadataBlockItems()
+	x.MaxObjectListBlockItems = v.MaxObjectListBlockItems()
+	x.MaxFreeDBAListBlockItems = v.MaxFreeDBAListBlockItems()
+	x.MaxFreePBAListBlockItems = v.MaxFreePBAListBlockItems()
+	x.MaxFreeLBAListBlockItems = v.MaxFreeLBAListBlockItems()
+	x.MaxNonDataLBAListBlockItems = v.MaxNonDataLBAListBlockItems()
+	x.MaxDBARegionListBlockItems = v.MaxDBARegionListBlockItems()
+	x.MaxFreeDataRegionListBlockItems = v.MaxFreeDataRegionListBlockItems()
+	x.MaxDeferredPBAListBlockItems = v.MaxDeferredPBAListBlockItems()
+}
+
+func (v StorageOptionsWriter) CopyFrom(x *input.StorageOptions) {
+	v.SetBlockSize(x.BlockSize)
+	v.SetMaxLBAMetadataBlockItems(x.MaxLBAMetadataBlockItems)
+	v.SetMaxObjectListBlockItems(x.MaxObjectListBlockItems)
+	v.SetMaxFreeDBAListBlockItems(x.MaxFreeDBAListBlockItems)
+	v.SetMaxFreePBAListBlockItems(x.MaxFreePBAListBlockItems)
+	v.SetMaxFreeLBAListBlockItems(x.MaxFreeLBAListBlockItems)
+	v.SetMaxNonDataLBAListBlockItems(x.MaxNonDataLBAListBlockItems)
+	v.SetMaxDBARegionListBlockItems(x.MaxDBARegionListBlockItems)
+	v.SetMaxFreeDataRegionListBlockItems(x.MaxFreeDataRegionListBlockItems)
+	v.SetMaxDeferredPBAListBlockItems(x.MaxDeferredPBAListBlockItems)
+}
+
+func (v StorageOptionsReader) BlockSize() uint32 {
+	var offset = fieldOffsetsOfStorageOptions[0]
+	return uint32(v.BlockBytes().Uint32At(offset))
 }
 
 func (v StorageOptionsWriter) SetBlockSize(x uint32) {
-	v.BlockBytes().SetUint32At(0, x)
+	var offset = fieldOffsetsOfStorageOptions[0]
+	v.BlockBytes().SetUint32At(offset, uint32(x))
 }
 
-func (v StorageOptions) MaxLBAMetadataBlockItems() uint32 {
-	return v.BlockBytes().Uint32At(4)
+func (v StorageOptionsReader) MaxLBAMetadataBlockItems() uint32 {
+	var offset = fieldOffsetsOfStorageOptions[1]
+	return uint32(v.BlockBytes().Uint32At(offset))
 }
 
 func (v StorageOptionsWriter) SetMaxLBAMetadataBlockItems(x uint32) {
-	v.BlockBytes().SetUint32At(4, x)
+	var offset = fieldOffsetsOfStorageOptions[1]
+	v.BlockBytes().SetUint32At(offset, uint32(x))
 }
 
-func (v StorageOptions) MaxObjectListBlockItems() uint32 {
-	return v.BlockBytes().Uint32At(8)
+func (v StorageOptionsReader) MaxObjectListBlockItems() uint32 {
+	var offset = fieldOffsetsOfStorageOptions[2]
+	return uint32(v.BlockBytes().Uint32At(offset))
 }
 
 func (v StorageOptionsWriter) SetMaxObjectListBlockItems(x uint32) {
-	v.BlockBytes().SetUint32At(8, x)
+	var offset = fieldOffsetsOfStorageOptions[2]
+	v.BlockBytes().SetUint32At(offset, uint32(x))
 }
 
-func (v StorageOptions) MaxFreeDBAListBlockItems() uint32 {
-	return v.BlockBytes().Uint32At(12)
+func (v StorageOptionsReader) MaxFreeDBAListBlockItems() uint32 {
+	var offset = fieldOffsetsOfStorageOptions[3]
+	return uint32(v.BlockBytes().Uint32At(offset))
 }
 
 func (v StorageOptionsWriter) SetMaxFreeDBAListBlockItems(x uint32) {
-	v.BlockBytes().SetUint32At(12, x)
+	var offset = fieldOffsetsOfStorageOptions[3]
+	v.BlockBytes().SetUint32At(offset, uint32(x))
 }
 
-func (v StorageOptions) MaxFreePBAListBlockItems() uint32 {
-	return v.BlockBytes().Uint32At(16)
+func (v StorageOptionsReader) MaxFreePBAListBlockItems() uint32 {
+	var offset = fieldOffsetsOfStorageOptions[4]
+	return uint32(v.BlockBytes().Uint32At(offset))
 }
 
 func (v StorageOptionsWriter) SetMaxFreePBAListBlockItems(x uint32) {
-	v.BlockBytes().SetUint32At(16, x)
+	var offset = fieldOffsetsOfStorageOptions[4]
+	v.BlockBytes().SetUint32At(offset, uint32(x))
 }
 
-func (v StorageOptions) MaxFreeLBAListBlockItems() uint32 {
-	return v.BlockBytes().Uint32At(20)
+func (v StorageOptionsReader) MaxFreeLBAListBlockItems() uint32 {
+	var offset = fieldOffsetsOfStorageOptions[5]
+	return uint32(v.BlockBytes().Uint32At(offset))
 }
 
 func (v StorageOptionsWriter) SetMaxFreeLBAListBlockItems(x uint32) {
-	v.BlockBytes().SetUint32At(20, x)
+	var offset = fieldOffsetsOfStorageOptions[5]
+	v.BlockBytes().SetUint32At(offset, uint32(x))
 }
 
-func (v StorageOptions) MaxNonDataLBAListBlockItems() uint32 {
-	return v.BlockBytes().Uint32At(24)
+func (v StorageOptionsReader) MaxNonDataLBAListBlockItems() uint32 {
+	var offset = fieldOffsetsOfStorageOptions[6]
+	return uint32(v.BlockBytes().Uint32At(offset))
 }
 
 func (v StorageOptionsWriter) SetMaxNonDataLBAListBlockItems(x uint32) {
-	v.BlockBytes().SetUint32At(24, x)
+	var offset = fieldOffsetsOfStorageOptions[6]
+	v.BlockBytes().SetUint32At(offset, uint32(x))
 }
 
-func (v StorageOptions) MaxDBARegionListBlockItems() uint32 {
-	return v.BlockBytes().Uint32At(28)
+func (v StorageOptionsReader) MaxDBARegionListBlockItems() uint32 {
+	var offset = fieldOffsetsOfStorageOptions[7]
+	return uint32(v.BlockBytes().Uint32At(offset))
 }
 
 func (v StorageOptionsWriter) SetMaxDBARegionListBlockItems(x uint32) {
-	v.BlockBytes().SetUint32At(28, x)
+	var offset = fieldOffsetsOfStorageOptions[7]
+	v.BlockBytes().SetUint32At(offset, uint32(x))
 }
 
-func (v StorageOptions) MaxFreeDataRegionListBlockItems() uint32 {
-	return v.BlockBytes().Uint32At(32)
+func (v StorageOptionsReader) MaxFreeDataRegionListBlockItems() uint32 {
+	var offset = fieldOffsetsOfStorageOptions[8]
+	return uint32(v.BlockBytes().Uint32At(offset))
 }
 
 func (v StorageOptionsWriter) SetMaxFreeDataRegionListBlockItems(x uint32) {
-	v.BlockBytes().SetUint32At(32, x)
+	var offset = fieldOffsetsOfStorageOptions[8]
+	v.BlockBytes().SetUint32At(offset, uint32(x))
 }
 
-func (v StorageOptions) MaxDeferredPBAListBlockItems() uint32 {
-	return v.BlockBytes().Uint32At(36)
+func (v StorageOptionsReader) MaxDeferredPBAListBlockItems() uint32 {
+	var offset = fieldOffsetsOfStorageOptions[9]
+	return uint32(v.BlockBytes().Uint32At(offset))
 }
 
 func (v StorageOptionsWriter) SetMaxDeferredPBAListBlockItems(x uint32) {
-	v.BlockBytes().SetUint32At(36, x)
+	var offset = fieldOffsetsOfStorageOptions[9]
+	v.BlockBytes().SetUint32At(offset, uint32(x))
 }

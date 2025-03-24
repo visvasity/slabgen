@@ -127,6 +127,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/format"
@@ -136,10 +137,10 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 
+	"github.com/visvasity/blockgen/typecheck"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/typeutil"
 )
@@ -191,12 +192,16 @@ func main() {
 		log.Fatal(err)
 	}
 	for _, t := range types {
-		tname, err := g.generate(t)
-		if err != nil {
+		if err := g.AddType(t); err != nil {
 			log.Fatal(err)
 		}
+	}
+	if err := g.generate(); err != nil {
+		log.Fatal(err)
+	}
+	for _, t := range types {
 		// Generate New* and Open* methods only for top-level data types.
-		if err := g.generateNewAndOpenMethods(tname); err != nil {
+		if err := g.generateNewAndOpenMethods(t); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -211,13 +216,6 @@ func main() {
 			log.Fatalf("writing output: %s", err)
 		}
 	}
-
-	// Create a common.blockgen.go file for common stuff if any.
-	src := g.GetSource("")
-	outputName := filepath.Join(*outDir, "common.blockgen.go")
-	if err := os.WriteFile(outputName, src, 0644); err != nil {
-		log.Fatalf("writing common.blockgen.go: %s", err)
-	}
 }
 
 func loadPackage(pkg string) (*packages.Package, error) {
@@ -231,43 +229,9 @@ func loadPackage(pkg string) (*packages.Package, error) {
 	return pkgs[0], nil
 }
 
-type FieldData struct {
-	Index int16
-	Name  string
-	Kind  string // One of ["int8","int16","int32","int64","uint8","uint16","uint32","uint64","struct","slice","array"]
-
-	Alignment int64
-	Offset    int64
-	Size      int64
-
-	TypeName    string
-	TypePkgPath string
-	TypePkgName string
-
-	Length int64 // -1 for slices, 0 for non-arrays and +ve value for arrays
-
-	ElementSize int64
-	ElementKind string // One of ["","int8","int16","int32","int64","uint8","uint16","uint32","uint64"] for slices and arrays
-}
-
-type StructData struct {
-	StructName string
-	Size       int64
-
-	FieldList []*FieldData
-}
-
-func (sd *StructData) HasSliceField() bool {
-	// Slice type field, if present, must be the last field.
-	if n := len(sd.FieldList); n > 0 {
-		return sd.FieldList[n-1].Length == -1
-	}
-	return false
-}
-
 type Generator struct {
 	failedTypes   typeutil.Map // map[*types.Type]error
-	checkedTypes  typeutil.Map // map[*types.Type]bool
+	checkedTypes  typeutil.Map // map[*types.Type]*StructData
 	checkingTypes typeutil.Map // map[*types.Type]bool
 
 	structsWithSlice map[string]bool
@@ -276,8 +240,6 @@ type Generator struct {
 
 	pkg     *packages.Package
 	pkgName string
-
-	common bytes.Buffer
 
 	bufferMap map[string]*bytes.Buffer
 
@@ -293,47 +255,32 @@ type Generator struct {
 	// in the generated file named "point.blockgen.go".
 	importsMap map[string]map[string]string
 
-	// aliasPkgMap holds typename to it's source package from where this type
-	// should be imported as an alias. For example,
-	//
-	//   aliasPkgMap["PBA"] == "storage"
-	//
-	// indicates that we should have the following import
-	//
-	//   type PBA = storage.PBA
-	//
-	// in the "common.blockgen.go" generated file. We expect an entry in the
-	// importMap for the "storage" package.
-	aliasPkgMap map[string]string
+	checker *typecheck.Checker
 
 	structDataMap map[string]*StructData
 }
 
+type StructData struct {
+	*typecheck.StructData
+
+	ReaderWriterTypeParams []*typecheck.TypeParamData
+}
+
 func newGenerator(pkg *packages.Package, pkgName string) (*Generator, error) {
 	g := &Generator{
-		pkg:              pkg,
-		pkgName:          pkgName,
-		aliasPkgMap:      make(map[string]string),
-		bufferMap:        make(map[string]*bytes.Buffer),
-		structsWithSlice: make(map[string]bool),
-		importsMap:       make(map[string]map[string]string),
-		sizer:            types.SizesFor(runtime.Compiler, runtime.GOARCH),
-		structDataMap:    make(map[string]*StructData),
+		checker:       typecheck.New(),
+		pkg:           pkg,
+		pkgName:       pkgName,
+		bufferMap:     make(map[string]*bytes.Buffer),
+		importsMap:    make(map[string]map[string]string),
+		structDataMap: make(map[string]*StructData),
 	}
 	return g, nil
 }
 
-func (g *Generator) readerName(typeName string) string {
-	return typeName
-}
-
-func (g *Generator) writerName(typeName string) string {
-	return typeName + "Writer"
-}
-
 func (g *Generator) getBuffer(typeName string) *bytes.Buffer {
 	if len(typeName) == 0 {
-		return &g.common
+		return nil
 	}
 	if b, ok := g.bufferMap[typeName]; ok {
 		return b
@@ -361,11 +308,6 @@ func (g *Generator) addImport(typeName string, importName, packagePath string) e
 		return fmt.Errorf("multiple different import names for package %q by type %q", packagePath, typeName)
 	}
 	return nil
-}
-
-func (g *Generator) addAlias(typeName, pkgName, pkgPath string) error {
-	g.aliasPkgMap[typeName] = pkgName
-	return g.addImport("", pkgName, pkgPath)
 }
 
 func (g *Generator) P(typeName string, v ...any) {
@@ -397,508 +339,249 @@ func (g *Generator) GetSource(typeName string) []byte {
 	return src
 }
 
-var fixedBasicTypeMap = map[types.BasicKind][3]string{
-	types.Int8:  {"int8", "Int8At", "SetInt8At"},
-	types.Int16: {"int16", "Int16At", "SetInt16At"},
-	types.Int32: {"int32", "Int32At", "SetInt32At"},
-	types.Int64: {"int64", "Int64At", "SetInt64At"},
+// var fixedBasicTypeMap = map[types.BasicKind][3]string{
+// 	types.Int8:  {"int8", "Int8At", "SetInt8At"},
+// 	types.Int16: {"int16", "Int16At", "SetInt16At"},
+// 	types.Int32: {"int32", "Int32At", "SetInt32At"},
+// 	types.Int64: {"int64", "Int64At", "SetInt64At"},
 
-	types.Uint8:  {"uint8", "Uint8At", "SetUint8At"},
-	types.Uint16: {"uint16", "Uint16At", "SetUint16At"},
-	types.Uint32: {"uint32", "Uint32At", "SetUint32At"},
-	types.Uint64: {"uint64", "Uint64At", "SetUint64At"},
+// 	types.Uint8:  {"uint8", "Uint8At", "SetUint8At"},
+// 	types.Uint16: {"uint16", "Uint16At", "SetUint16At"},
+// 	types.Uint32: {"uint32", "Uint32At", "SetUint32At"},
+// 	types.Uint64: {"uint64", "Uint64At", "SetUint64At"},
+// }
+
+var basicMethodTypeMap = map[string][3]string{
+	"int8":  {"int8", "Int8At", "SetInt8At"},
+	"int16": {"int16", "Int16At", "SetInt16At"},
+	"int32": {"int32", "Int32At", "SetInt32At"},
+	"int64": {"int64", "Int64At", "SetInt64At"},
+
+	"uint8":  {"uint8", "Uint8At", "SetUint8At"},
+	"uint16": {"uint16", "Uint16At", "SetUint16At"},
+	"uint32": {"uint32", "Uint32At", "SetUint32At"},
+	"uint64": {"uint64", "Uint64At", "SetUint64At"},
+
+	"byte": {"uint8", "Uint8At", "SetUint8At"},
 }
 
-var basicKindMap = map[string]types.BasicKind{
-	"int8":   types.Int8,
-	"int16":  types.Int16,
-	"int32":  types.Int32,
-	"int64":  types.Int64,
-	"uint8":  types.Uint8,
-	"uint16": types.Uint16,
-	"uint32": types.Uint32,
-	"uint64": types.Uint64,
+// var intMethodTypeMap = map[int][3]string{
+// 	1: {"int8", "Int8At", "SetInt8At"},
+// 	2: {"int16", "Int16At", "SetInt16At"},
+// 	4: {"int32", "Int32At", "SetInt32At"},
+// 	8: {"int64", "Int64At", "SetInt64At"},
+// }
+
+// var basicKindMap = map[string]types.BasicKind{
+// 	"int8":   types.Int8,
+// 	"int16":  types.Int16,
+// 	"int32":  types.Int32,
+// 	"int64":  types.Int64,
+// 	"uint8":  types.Uint8,
+// 	"uint16": types.Uint16,
+// 	"uint32": types.Uint32,
+// 	"uint64": types.Uint64,
+// }
+
+// // func (g *Generator) getStructFieldData(tname *types.TypeName, i int) (*typecheck.FieldData, error) {
+// // 	key := tname.Pkg().Path() + "." + tname.Name()
+// // 	return g.structDataMap[key].FieldList[i], nil
+// // }
+
+// var knownTypesMap = map[string]types.Type{
+// 	"int8":    types.Typ[types.Int8],
+// 	"int16":   types.Typ[types.Int16],
+// 	"int32":   types.Typ[types.Int32],
+// 	"int64":   types.Typ[types.Int64],
+// 	"uint8":   types.Typ[types.Uint8],
+// 	"uint16":  types.Typ[types.Uint16],
+// 	"uint32":  types.Typ[types.Uint32],
+// 	"uint64":  types.Typ[types.Uint64],
+// 	"float32": types.Typ[types.Float32],
+// 	"float64": types.Typ[types.Float64],
+// }
+
+// func (g *Generator) instantiateType(typeArg string) (string, *types.Named, error) {
+// 	scope := g.pkg.Types.Scope()
+// 	if !strings.ContainsRune(typeArg, '=') {
+// 		object := scope.Lookup(typeArg)
+// 		if object == nil {
+// 			return "", nil, fmt.Errorf("could not find type for type name arg %q", typeArg)
+// 		}
+// 		named, ok := object.Type().(*types.Named)
+// 		if !ok {
+// 			return "", nil, fmt.Errorf("type name arg %q is not a named type", typeArg)
+// 		}
+// 		return object.Name(), named, nil
+// 	}
+
+// 	typeName, a, _ := strings.Cut(typeArg, "=")
+// 	genericName, b, ok := strings.Cut(a, "[")
+// 	if !ok {
+// 		return "", nil, fmt.Errorf("could not find [ character in generic type arg %q", typeArg)
+// 	}
+// 	c, _, ok := strings.Cut(b, "]")
+// 	if !ok {
+// 		return "", nil, fmt.Errorf("could not find ] character in generic type arg %q", typeArg)
+// 	}
+// 	typeArgs := strings.Split(c, ",")
+
+// 	origObj := scope.Lookup(genericName)
+// 	if origObj == nil {
+// 		return "", nil, fmt.Errorf("could not find generic type name %q", genericName)
+// 	}
+// 	orig, ok := origObj.(*types.TypeName)
+// 	if !ok {
+// 		return "", nil, fmt.Errorf("generic type name %q is not of a *types.TypeName type (%T)", genericName, origObj)
+// 	}
+
+// 	var targs []types.Type
+// 	for _, arg := range typeArgs {
+// 		if v, ok := knownTypesMap[arg]; ok {
+// 			targs = append(targs, v)
+// 			continue
+// 		}
+// 		obj := scope.Lookup(arg)
+// 		if obj == nil {
+// 			return "", nil, fmt.Errorf("could not find generic type argment %q in %q", arg, typeName)
+// 		}
+// 		targs = append(targs, obj.Type())
+// 	}
+
+// 	ftype, err := types.Instantiate(nil, orig.Type(), targs, true /* validate */)
+// 	if err != nil {
+// 		return "", nil, fmt.Errorf("could not instantiate generic type %q: %w", typeName, err)
+// 	}
+// 	named, ok := ftype.(*types.Named)
+// 	if !ok {
+// 		return "", nil, fmt.Errorf("type name arg %q is not a named type", typeArg)
+// 	}
+// 	knownTypesMap[typeName] = named
+// 	return typeName, named, nil
+// }
+
+func clone(sdata *typecheck.StructData) *typecheck.StructData {
+	js, _ := json.Marshal(sdata)
+	v := new(typecheck.StructData)
+	if err := json.Unmarshal(js, v); err != nil {
+		panic(err)
+	}
+	return v
 }
 
-func (g *Generator) checkFieldType(named *types.Named, s *types.Struct, v *types.Var) error {
-	vtype := v.Type()
-	log.Printf("checkFieldType: v=%v vtype=%T", v, vtype)
-
-	switch x := vtype.(type) {
-	default:
-		return fmt.Errorf("checkFieldType: field (%v) of type %T is not supported", v, vtype)
-
-	case *types.Basic:
-		if _, ok := fixedBasicTypeMap[x.Kind()]; !ok {
-			return fmt.Errorf("checkFieldType: basic field (%v) of type %T is not supported", v, vtype)
-		}
-
-	case *types.Struct:
-		if xxx := g.failedTypes.At(x); xxx != nil {
-			return fmt.Errorf("checkFieldType: underlying struct type (%v) is not supported", x)
-		}
-		ntype, ok := vtype.(*types.Named)
-		if !ok {
-			return fmt.Errorf("checkFieldType: anonymous/inline struct field types are not supported")
-		}
-		return g.checkType(ntype)
-
-	case *types.Named:
-	case *types.Array:
-		// TODO: Check and determine all array dimensions.
-	case *types.Slice:
-	}
-
-	if err := g.checkUnderlyingType(named, s, v); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (g *Generator) checkUnderlyingType(named *types.Named, s *types.Struct, v *types.Var) error {
-	vtype := v.Type()
-	utype := vtype.Underlying()
-
-	switch x := utype.(type) {
-	default:
-		return fmt.Errorf("field (%v) of type %T is not supported", v, utype)
-
-	case *types.Basic:
-		if _, ok := fixedBasicTypeMap[x.Kind()]; !ok {
-			return fmt.Errorf("basic field (%v) of type %T is not supported", v, vtype)
-		}
-	case *types.Array:
-		if n := x.Len(); n == 0 {
-			return fmt.Errorf("zero sized arrays are not supported")
-		}
-		if _, ok := x.Elem().(*types.Basic); ok {
-			return nil
-		}
-		if _, ok := x.Elem().Underlying().(*types.Basic); ok {
-			return nil
-		}
-		ntype, ok := x.Elem().(*types.Named)
-		if !ok {
-			return fmt.Errorf("array element type (%T) is not supported", x.Elem())
-		}
-		if err := g.checkType(ntype); err != nil {
-			return err
-		}
-		if _, ok := g.structsWithSlice[ntype.Obj().Id()]; ok {
-			return fmt.Errorf("slices element type (%v) must be of fixed size", x.Elem())
-		}
-	case *types.Struct:
-		if xxx := g.failedTypes.At(x); xxx != nil {
-			return fmt.Errorf("underlying struct type (%v) is not supported", x)
-		}
-		ntype, ok := vtype.(*types.Named)
-		if !ok {
-			return fmt.Errorf("anonymous/inline struct field types are not supported")
-		}
-		return g.checkType(ntype)
-	case *types.Slice:
-		if _, ok := x.Elem().(*types.Basic); ok {
-			return nil
-		}
-		if _, ok := x.Elem().Underlying().(*types.Basic); ok {
-			return nil
-		}
-		ntype, ok := x.Elem().(*types.Named)
-		if !ok {
-			return fmt.Errorf("slice element type (%T) is not supported", x.Elem())
-		}
-		if err := g.checkType(ntype); err != nil {
-			return err
-		}
-		if _, ok := g.structsWithSlice[ntype.Obj().Id()]; ok {
-			return fmt.Errorf("slices element type (%v) must be of fixed size", x.Elem())
-		}
-	}
-	return nil
-}
-
-func (g *Generator) checkType(named *types.Named) (status error) {
-	// Input type MUST be resolved to a struct type.
-	s, ok := named.Underlying().(*types.Struct)
-	if !ok {
-		return fmt.Errorf("input type (%v) is not a named struct type", named)
-	}
-
-	if v := g.checkedTypes.At(s); v != nil {
-		return nil
-	}
-	if v := g.failedTypes.At(s); v != nil {
-		return fmt.Errorf("struct type is not supported: %w", v.(error))
-	}
-	if v := g.checkingTypes.At(s); v != nil {
-		return fmt.Errorf("struct type (%v) with recursive references is not supported", s)
-	}
-
-	g.checkingTypes.Set(s, true)
-	defer func() {
-		if status == nil {
-			g.checkedTypes.Set(s, true)
-		} else {
-			g.failedTypes.Set(s, status)
-		}
-		g.checkingTypes.Delete(s)
-	}()
-
-	// log.Printf("checkType: Named=%v Named.Obj=%v Named.Origin=%v Named.Underlying=%v", named, named.Obj(), named.Origin(), named.Underlying())
-
-	for i := 0; i < s.NumFields(); i++ {
-		v := s.Field(i)
-		if v.Anonymous() {
-			return fmt.Errorf("anonymous fields (%v) are not supported", v)
-		}
-
-		if _, ok := v.Type().Underlying().(*types.Slice); ok {
-			if i != s.NumFields()-1 {
-				return fmt.Errorf("slice field (%v) must be the last field of a struct", v)
-			}
-			g.structsWithSlice[named.Obj().Id()] = true
-		}
-
-		if err := g.checkFieldType(named, s, v); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (g *Generator) prepareStructData(localName string, named *types.Named) (*StructData, error) {
-	if len(localName) == 0 {
-		localName = named.Obj().Name()
-	}
-
-	skey := named.String()
-	sdata := &StructData{StructName: localName}
-
-	stype, ok := named.Underlying().(*types.Struct)
-	if !ok {
-		return nil, fmt.Errorf("input type (%v) is not a struct", named)
-	}
-
-	//log.Printf("prepareStructData: named.string=%q struct-name=%s type-args=%v", named.String(), sdata.StructName, named.TypeArgs())
-
-	var fs []*types.Var
-	for i := 0; i < stype.NumFields(); i++ {
-		f := stype.Field(i)
-		fdata := &FieldData{
-			Index:     int16(i),
-			Name:      f.Name(),
-			Alignment: g.sizer.Alignof(f.Type()),
-			Size:      g.sizer.Sizeof(f.Type()),
-		}
-
-		// Set Kind and Length fields.
-		switch x := f.Type().Underlying().(type) {
-		case *types.Basic:
-			fdata.Kind = fixedBasicTypeMap[x.Kind()][0]
-		case *types.Struct:
-			fdata.Kind = "struct"
-		case *types.Array:
-			fdata.Kind = "array"
-			fdata.Length = x.Len()
-		case *types.Slice:
-			fdata.Kind = "slice"
-			fdata.Length = -1
-		}
-
-		// log.Printf("struct=%s field=%s f.Type()=%T", sdata.StructName, fdata.Name, f.Type())
-
-		// Set TypeName, TypePkgPath, TypePkgName fields.
-		switch x := f.Type().(type) {
-		case *types.Alias:
-			fdata.TypeName = x.Obj().Name()
-			fdata.TypePkgPath = x.Obj().Pkg().Path()
-			fdata.TypePkgName = x.Obj().Pkg().Name()
-		case *types.Named:
-			fdata.TypeName = x.Obj().Name()
-			fdata.TypePkgPath = x.Obj().Pkg().Path()
-			fdata.TypePkgName = x.Obj().Pkg().Name()
-		case *types.Array:
-			if v, ok := x.Elem().Underlying().(*types.Basic); ok {
-				fdata.ElementKind = fixedBasicTypeMap[v.Kind()][0]
-				fdata.ElementSize = g.sizer.Sizeof(x.Elem())
-			}
-			if v, ok := x.Elem().(*types.Named); ok {
-				fdata.TypeName = v.Obj().Name()
-				fdata.TypePkgPath = v.Obj().Pkg().Path()
-				fdata.TypePkgName = v.Obj().Pkg().Name()
-				fdata.ElementSize = g.sizer.Sizeof(x.Elem())
-			}
-		case *types.Slice:
-			if v, ok := x.Elem().Underlying().(*types.Basic); ok {
-				fdata.ElementKind = fixedBasicTypeMap[v.Kind()][0]
-				fdata.ElementSize = g.sizer.Sizeof(x.Elem())
-			}
-			if v, ok := x.Elem().(*types.Named); ok {
-				fdata.TypeName = v.Obj().Name()
-				fdata.TypePkgPath = v.Obj().Pkg().Path()
-				fdata.TypePkgName = v.Obj().Pkg().Name()
-				fdata.ElementSize = g.sizer.Sizeof(x.Elem())
-			}
-		}
-
-		fs = append(fs, f)
-		sdata.FieldList = append(sdata.FieldList, fdata)
-	}
-
-	// Set Offset field.
-	offsets := g.sizer.Offsetsof(fs)
-	for i, offset := range offsets {
-		sdata.FieldList[i].Offset = offset
-	}
-
-	// Set the StructData.Size field.
-	sdata.Size = g.sizer.Sizeof(stype)
-
-	// js, _ := json.MarshalIndent(sdata, "", "  ")
-	// log.Printf("%s", js)
-
-	g.structDataMap[skey] = sdata
-	return sdata, nil
-}
-
-func (g *Generator) getStructData(typeName string) (*StructData, error) {
-	for _, v := range g.structDataMap {
-		if v.StructName == typeName {
-			return v, nil
-		}
-	}
-	return nil, fmt.Errorf("typename %q doesn't exist", typeName)
-}
-
-func (g *Generator) getStructFieldData(tname *types.TypeName, i int) (*FieldData, error) {
-	key := tname.Pkg().Path() + "." + tname.Name()
-	return g.structDataMap[key].FieldList[i], nil
-}
-
-var knownTypesMap = map[string]types.Type{
-	"int8":    types.Typ[types.Int8],
-	"int16":   types.Typ[types.Int16],
-	"int32":   types.Typ[types.Int32],
-	"int64":   types.Typ[types.Int64],
-	"uint8":   types.Typ[types.Uint8],
-	"uint16":  types.Typ[types.Uint16],
-	"uint32":  types.Typ[types.Uint32],
-	"uint64":  types.Typ[types.Uint64],
-	"float32": types.Typ[types.Float32],
-	"float64": types.Typ[types.Float64],
-}
-
-func (g *Generator) instantiateType(typeArg string) (string, *types.Named, error) {
-	scope := g.pkg.Types.Scope()
-	if !strings.ContainsRune(typeArg, '=') {
-		object := scope.Lookup(typeArg)
-		if object == nil {
-			return "", nil, fmt.Errorf("could not find type for type name arg %q", typeArg)
-		}
-		named, ok := object.Type().(*types.Named)
-		if !ok {
-			return "", nil, fmt.Errorf("type name arg %q is not a named type", typeArg)
-		}
-		return object.Name(), named, nil
-	}
-
-	typeName, a, _ := strings.Cut(typeArg, "=")
-	genericName, b, ok := strings.Cut(a, "[")
-	if !ok {
-		return "", nil, fmt.Errorf("could not find [ character in generic type arg %q", typeArg)
-	}
-	c, _, ok := strings.Cut(b, "]")
-	if !ok {
-		return "", nil, fmt.Errorf("could not find ] character in generic type arg %q", typeArg)
-	}
-	typeArgs := strings.Split(c, ",")
-
-	origObj := scope.Lookup(genericName)
-	if origObj == nil {
-		return "", nil, fmt.Errorf("could not find generic type name %q", genericName)
-	}
-	orig, ok := origObj.(*types.TypeName)
-	if !ok {
-		return "", nil, fmt.Errorf("generic type name %q is not of a *types.TypeName type (%T)", genericName, origObj)
-	}
-
-	var targs []types.Type
-	for _, arg := range typeArgs {
-		if v, ok := knownTypesMap[arg]; ok {
-			targs = append(targs, v)
+func (g *Generator) prepareOutputStructDataMap() {
+	for sname, sdata := range g.checker.StructDataMap() {
+		if _, ok := g.structDataMap[sname]; ok {
 			continue
 		}
-		obj := scope.Lookup(arg)
-		if obj == nil {
-			return "", nil, fmt.Errorf("could not find generic type argment %q in %q", arg, typeName)
-		}
-		targs = append(targs, obj.Type())
-	}
 
-	ftype, err := types.Instantiate(nil, orig.Type(), targs, true /* validate */)
-	if err != nil {
-		return "", nil, fmt.Errorf("could not instantiate generic type %q: %w", typeName, err)
+		v := &StructData{StructData: clone(sdata)}
+		for _, fdata := range v.StructData.Fields {
+			if fdata.TypeParams != nil {
+
+			}
+		}
+
+		for _, tp := range sdata.TypeParams {
+			if tp.Constraint == "Struct" && tp.PkgPath == "github.com/visvasity/blockgen/blockgen" {
+				v.ReaderWriterTypeParams = append(v.ReaderWriterTypeParams,
+					&typecheck.TypeParamData{
+						Name:       tp.Name + "Reader",
+						Constraint: "Reader[" + tp.Name + "," + tp.Name + "Writer]",
+						PkgPath:    "github.com/visvasity/blockgen/blockgen",
+						PkgName:    "blockgen",
+					},
+					&typecheck.TypeParamData{
+						Name:       tp.Name + "Writer",
+						Constraint: "Writer[" + tp.Name + "," + tp.Name + "Reader]",
+						PkgPath:    "github.com/visvasity/blockgen/blockgen",
+						PkgName:    "blockgen",
+					},
+				)
+			}
+		}
+		g.structDataMap[sname] = v
 	}
-	named, ok := ftype.(*types.Named)
-	if !ok {
-		return "", nil, fmt.Errorf("type name arg %q is not a named type", typeArg)
-	}
-	knownTypesMap[typeName] = named
-	return typeName, named, nil
 }
 
-func (g *Generator) generate(typeArg string) (string, error) {
-	localName, named, err := g.instantiateType(typeArg)
-	if err != nil {
-		return "", err
+func (g *Generator) AddType(name string) error {
+	scope := g.pkg.Types.Scope()
+	object := scope.Lookup(name)
+	if object == nil {
+		return fmt.Errorf("could not find type for type name arg %q", name)
+	}
+	named, ok := object.Type().(*types.Named)
+	if !ok {
+		return fmt.Errorf("type name arg %q is not a named type", name)
 	}
 
-	if err := g.checkType(named); err != nil {
-		return "", err
+	if err := g.checker.Check(named.Obj()); err != nil {
+		return err
 	}
-	s := named.Underlying().(*types.Struct)
+	g.prepareOutputStructDataMap()
+	return nil
+}
 
-	// Generate code for all dependent struct types.
-	for i := 0; i < s.NumFields(); i++ {
-		v := s.Field(i)
-		switch x := v.Type().Underlying().(type) {
-		case *types.Slice:
-			if ntype, ok := x.Elem().(*types.Named); ok {
-				subName := ntype.Obj().Name()
-				if _, ok := g.bufferMap[subName]; ok {
-					continue
+func (g *Generator) generate() error {
+	for sname, sdata := range g.structDataMap {
+		_ = sname
+		// js, _ := json.MarshalIndent(sdata, "", "  ")
+		// log.Printf("%s=%s", sname, js)
+
+		if err := g.generateReaderWriterTypes(sdata); err != nil {
+			return err
+		}
+		if err := g.generateReaderWriterMethods(sdata); err != nil {
+			return err
+		}
+		if err := g.generateZeroMethods(sdata); err != nil {
+			return err
+		}
+		if err := g.generatePrintMethods(sdata); err != nil {
+			return err
+		}
+		if err := g.generateCopyMethods(sdata); err != nil {
+			return err
+		}
+		for _, fdata := range sdata.Fields {
+			switch fdata.Kind {
+			case "basic":
+				if err := g.generateNumberFieldMethods(sdata, fdata); err != nil {
+					return err
 				}
-				if _, ok := x.Elem().Underlying().(*types.Struct); ok {
-					if _, err := g.generate(subName); err != nil {
-						return "", err
+			case "struct":
+				if err := g.generateStructFieldMethods(sdata, fdata); err != nil {
+					return err
+				}
+			case "slice":
+				if err := g.generateSliceMethods(sdata); err != nil {
+					return err
+				}
+				if fdata.SliceKind == "basic" {
+					if err := g.generateSliceOfNumbersFieldMethods(sdata, fdata); err != nil {
+						return err
 					}
 				}
-			}
-		case *types.Array:
-			if ntype, ok := x.Elem().(*types.Named); ok {
-				subName := ntype.Obj().Name()
-				if _, ok := g.bufferMap[subName]; ok {
-					continue
-				}
-				if _, ok := x.Elem().Underlying().(*types.Struct); ok {
-					if _, err := g.generate(subName); err != nil {
-						return "", err
+				if fdata.SliceKind == "struct" {
+					if err := g.generateSliceOfStructsFieldMethods(sdata, fdata); err != nil {
+						return err
 					}
 				}
-			}
-		case *types.Struct:
-			if ntype, ok := v.Type().(*types.Named); ok {
-				subName := ntype.Obj().Name()
-				if _, ok := g.bufferMap[subName]; ok {
-					continue
+			case "array":
+				if fdata.ArrayKind == "basic" {
+					if err := g.generateArrayOfNumbersFieldMethods(sdata, fdata); err != nil {
+						return err
+					}
 				}
-				if _, err := g.generate(subName); err != nil {
-					return "", err
+				if fdata.ArrayKind == "struct" {
+					if err := g.generateArrayOfStructsFieldMethods(sdata, fdata); err != nil {
+						return err
+					}
 				}
 			}
 		}
 	}
-
-	// Populate the field data map for the struct.
-	sdata, err := g.prepareStructData(localName, named)
-	if err != nil {
-		return "", err
-	}
-
-	if err := g.generateReaderWriterTypes(sdata.StructName); err != nil {
-		return "", err
-	}
-	if err := g.generateReaderWriterMethods(sdata); err != nil {
-		return "", err
-	}
-	if err := g.generateZeroMethods(sdata); err != nil {
-		return "", err
-	}
-	if err := g.generatePrintMethods(sdata); err != nil {
-		return "", err
-	}
-	for i, fdata := range sdata.FieldList {
-		switch fdata.Kind {
-		case "struct":
-			if err := g.generateStructMethods(sdata, i); err != nil {
-				return "", err
-			}
-
-		case "array":
-			if len(fdata.ElementKind) != 0 {
-				if len(fdata.TypeName) == 0 {
-					if err := g.generateBasicArrayMethods(sdata, i); err != nil {
-						return "", err
-					}
-				} else {
-					if err := g.generateBasicNamedArrayMethods(sdata, i); err != nil {
-						return "", err
-					}
-				}
-				if err := g.generateAssignArrayMethods(sdata, i); err != nil {
-					return "", err
-				}
-				if err := g.generateCopyMethods(sdata, i); err != nil {
-					return "", err
-				}
-			} else {
-				if err := g.generateNamedStructArrayMethods(sdata, i); err != nil {
-					return "", err
-				}
-			}
-			if err := g.generateIteratorMethods(sdata, i); err != nil {
-				return "", err
-			}
-			if err := g.generateSortAndFindMethods(sdata, i); err != nil {
-				return "", err
-			}
-		case "slice":
-			if err := g.generateSliceMethods(sdata, i); err != nil {
-				return "", err
-			}
-			if len(fdata.ElementKind) != 0 {
-				if len(fdata.TypeName) == 0 {
-					if err := g.generateBasicSliceMethods(sdata, i); err != nil {
-						return "", err
-					}
-				} else {
-					if err := g.generateBasicNamedSliceMethods(sdata, i); err != nil {
-						return "", err
-					}
-				}
-				if err := g.generateCopyMethods(sdata, i); err != nil {
-					return "", err
-				}
-			} else {
-				if err := g.generateNamedStructSliceMethods(sdata, i); err != nil {
-					return "", err
-				}
-				if err := g.generateCoalesceMethod(sdata, i); err != nil {
-					return "", err
-				}
-			}
-			if err := g.generateSliceRemoveMethod(sdata, i); err != nil {
-				return "", err
-			}
-			if err := g.generateIteratorMethods(sdata, i); err != nil {
-				return "", err
-			}
-			if err := g.generateSortAndFindMethods(sdata, i); err != nil {
-				return "", err
-			}
-		default: // Basic intX or uintX
-			if len(fdata.TypeName) == 0 {
-				if err := g.generateBasicMethods(sdata, i); err != nil {
-					return "", err
-				}
-			} else {
-				if err := g.generateBasicNamedMethods(sdata, i); err != nil {
-					return "", err
-				}
-			}
-		}
-	}
-	return localName, nil
+	return nil
 }
 
 func (g *Generator) getImports(typeName string) [][2]string {
@@ -914,8 +597,11 @@ func (g *Generator) getImports(typeName string) [][2]string {
 }
 
 func (g *Generator) getSourceWithImports(typeName string) *bytes.Buffer {
-	buf := new(bytes.Buffer)
+	if len(typeName) == 0 {
+		return nil
+	}
 
+	buf := new(bytes.Buffer)
 	fmt.Fprintln(buf, "// Code generated by github.com/visvasity/blockgen. DO NOT EDIT.")
 	fmt.Fprintln(buf)
 	fmt.Fprintln(buf, "package", g.pkgName)
@@ -935,135 +621,822 @@ func (g *Generator) getSourceWithImports(typeName string) *bytes.Buffer {
 	}
 	fmt.Fprintln(buf)
 
-	if len(typeName) == 0 {
-		g.generateCommonTypeAliases()
-	}
-
 	io.Copy(buf, g.getBuffer(typeName))
 	return buf
 }
 
-func (g *Generator) generateReaderWriterTypes(typeName string) error {
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
+func (g *Generator) IsGenericStruct(sdata *StructData) bool {
+	return len(sdata.TypeParams) != 0
+}
 
-	if err := g.addImport(typeName, "", "github.com/visvasity/blockgen/blockgen"); err != nil {
+func (g *Generator) IsGenericField(sdata *StructData, fdata *typecheck.FieldData) bool {
+	return len(fdata.TypeArgs) != 0 || len(fdata.TypeParams) != 0
+}
+
+func (g *Generator) IsGenericTypeParamField(sdata *StructData, fdata *typecheck.FieldData) bool {
+	if !g.IsGenericField(sdata, fdata) {
+		return false
+	}
+	for _, tp := range sdata.TypeParams {
+		if tp.Name == fdata.TypeName {
+			return true
+		}
+	}
+	return false
+}
+
+type structTypeNameOptions struct {
+	PkgName                       bool
+	TypeArgs                      bool
+	TypeArgPkgNames               bool
+	TypeParams                    bool // Overrides TypeArgs
+	TypeConstraints               bool // Overrides TypeParams and TypeArgs
+	TypeConstraintPkgNames        bool
+	IncludeReaderWriterTypeParams bool
+}
+
+type fieldTypeNameOptions struct {
+	PkgName                     bool
+	TypeArgs                    bool
+	TypeArgPkgNames             bool
+	IncludeReaderWriterTypeArgs bool
+}
+
+var (
+	inputStructNameOpts = structTypeNameOptions{PkgName: true, TypeParams: true}
+	receiverNameOptions = structTypeNameOptions{TypeParams: true, IncludeReaderWriterTypeParams: true}
+)
+
+func (g *Generator) prepStructTypeName(sdata *StructData, prefix, suffix string, opts *structTypeNameOptions) string {
+	if opts == nil {
+		opts = &structTypeNameOptions{}
+	}
+	name := prefix + sdata.StructName + suffix
+	if opts.PkgName && len(sdata.PkgName) != 0 {
+		name = sdata.PkgName + "." + name
+	}
+
+	if opts.TypeConstraints && len(sdata.TypeParams) != 0 {
+		tps := sdata.TypeParams
+		if opts.IncludeReaderWriterTypeParams {
+			tps = append(tps, sdata.ReaderWriterTypeParams...)
+		}
+		vs := make([]string, len(tps))
+		for i, tp := range tps {
+			cname := tp.Constraint
+			if opts.TypeConstraintPkgNames && len(tp.PkgName) != 0 {
+				cname = tp.PkgName + "." + cname
+			}
+			vs[i] = tp.Name + " " + cname
+		}
+		return name + "[" + strings.Join(vs, ",") + "]"
+	}
+
+	if opts.TypeParams && len(sdata.TypeParams) != 0 {
+		tps := sdata.TypeParams
+		if opts.IncludeReaderWriterTypeParams {
+			tps = append(tps, sdata.ReaderWriterTypeParams...)
+		}
+
+		vs := make([]string, len(tps))
+		for i, tp := range tps {
+			vs[i] = tp.Name
+		}
+		return name + "[" + strings.Join(vs, ",") + "]"
+	}
+	return name
+}
+
+func (g *Generator) prepFieldTypeName(sdata *StructData, fdata *typecheck.FieldData, prefix, suffix string, opts *fieldTypeNameOptions) string {
+	if opts == nil {
+		opts = &fieldTypeNameOptions{}
+	}
+	name := prefix + fdata.TypeName + suffix
+	if opts.PkgName && len(fdata.TypePkgName) != 0 {
+		name = fdata.TypePkgName + "." + name
+	}
+
+	var rwArgs []*typecheck.TypeArgData
+	if opts.IncludeReaderWriterTypeArgs {
+		for i, ta := range fdata.TypeArgs {
+			if fdata.TypeParams[i].Constraint == "Struct" && fdata.TypeParams[i].PkgPath == "github.com/visvasity/blockgen/blockgen" {
+				rwArgs = append(rwArgs, &typecheck.TypeArgData{Name: ta.Name + "Reader"})
+				rwArgs = append(rwArgs, &typecheck.TypeArgData{Name: ta.Name + "Writer"})
+			}
+		}
+	}
+
+	if opts.TypeArgs && len(fdata.TypeArgs) != 0 {
+		tas := fdata.TypeArgs
+		if opts.IncludeReaderWriterTypeArgs {
+			tas = append(tas, rwArgs...)
+		}
+		vs := make([]string, len(tas))
+		for i, ta := range tas {
+			if opts.TypeArgPkgNames && len(ta.PkgName) != 0 {
+				vs[i] = ta.PkgName + "." + ta.Name
+			} else {
+				vs[i] = ta.Name
+			}
+		}
+		return name + "[" + strings.Join(vs, ",") + "]"
+	}
+	return name
+}
+
+func (g *Generator) sliceField(sdata *StructData) *typecheck.FieldData {
+	if n := len(sdata.Fields); n > 0 && sdata.Fields[n-1].Kind == "slice" {
+		return sdata.Fields[n-1]
+	}
+	return nil
+}
+
+func (g *Generator) generateReaderWriterTypes(sdata *StructData) error {
+	if err := g.addImport(sdata.StructName, "", "github.com/visvasity/blockgen/blockgen"); err != nil {
 		return err
 	}
 
-	g.P(typeName)
-	g.P(typeName, "// Reader type defines accessor methods for read-only access.")
-	g.P(typeName, "type ", readerTypeName, " blockgen.BlockBytes")
-	g.P(typeName)
-	g.P(typeName, "// Writer type extends the reader with mutable methods.")
-	g.P(typeName, "type ", writerTypeName, " struct { ", readerTypeName, " }")
-	g.P(typeName)
+	defineNameOptions := structTypeNameOptions{TypeParams: true, TypeConstraints: true, TypeConstraintPkgNames: true, IncludeReaderWriterTypeParams: true}
+	readerDefinition := g.prepStructTypeName(sdata, "", "Reader", &defineNameOptions)
+	writerDefinition := g.prepStructTypeName(sdata, "", "Writer", &defineNameOptions)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
 
-	return nil
+	g.P(sdata.StructName)
+	g.P(sdata.StructName, "// Reader type defines accessor methods for read-only access.")
+	g.P(sdata.StructName, "type ", readerDefinition, " blockgen.BlockBytes")
+	g.P(sdata.StructName)
+	g.P(sdata.StructName, "// Writer type extends the reader with mutable methods.")
+	g.P(sdata.StructName, "type ", writerDefinition, " struct { ", readerReceiver, " }")
+	g.P(sdata.StructName)
+
+	return g.generateFieldMetadataVars(sdata)
 }
 
 func (g *Generator) generateReaderWriterMethods(sdata *StructData) error {
 	typeName := sdata.StructName
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	writerReceiver := g.prepStructTypeName(sdata, "", "Writer", &receiverNameOptions)
 
 	g.P(typeName)
 	g.P(typeName, "// BlockBytes returns access to the underlying byte slice.")
-	g.P(typeName, "func (v ", readerTypeName, ") BlockBytes() blockgen.BlockBytes {")
+	g.P(typeName, "func (v ", readerReceiver, ") BlockBytes() blockgen.BlockBytes {")
 	g.P(typeName, "  return blockgen.BlockBytes(v)")
 	g.P(typeName, "}")
 	g.P(typeName)
 
 	g.P(typeName)
 	g.P(typeName, "// Writer returns the ", typeName, " writer for read-write access to it's fields.")
-	g.P(typeName, "func (v ", readerTypeName, ") Writer() ", writerTypeName, " {")
-	g.P(typeName, "  return ", writerTypeName, "{v}")
+	g.P(typeName, "func (v ", readerReceiver, ") Writer() ", writerReceiver, " {")
+	g.P(typeName, "  return ", writerReceiver, "{v}")
 	g.P(typeName, "}")
 	g.P(typeName)
 
 	g.P(typeName)
 	g.P(typeName, "// Reader returns the ", typeName, " reader with read-only access to it's fields.")
-	g.P(typeName, "func (v ", writerTypeName, ") Reader() ", readerTypeName, " {")
-	g.P(typeName, "  return v.", readerTypeName)
+	g.P(typeName, "func (v ", writerReceiver, ") Reader() ", readerReceiver, " {")
+	g.P(typeName, "  return v.", g.prepStructTypeName(sdata, "", "Reader", nil))
+	g.P(typeName, "}")
+	g.P(typeName)
+	return nil
+}
+
+func (g *Generator) structSizeVarName(sdata *StructData) string {
+	return "structSizeOf" + sdata.StructName
+}
+
+func (g *Generator) fieldOffsetsVarName(sdata *StructData) string {
+	return "fieldOffsetsOf" + sdata.StructName
+}
+
+func (g *Generator) fieldOffsetsMapVarName(sdata *StructData) string {
+	return "fieldOffsetsOf" + sdata.StructName
+}
+
+func (g *Generator) sliceDataAlignVarName(sdata *StructData) string {
+	return "sliceDataAlignOf" + sdata.StructName
+}
+
+func (g *Generator) sliceElementSizeVarName(sdata *StructData) string {
+	return "sliceElemSizeOf" + sdata.StructName
+}
+
+// func (g *Generator) arrayElementSizeVarName(sdata *typecheck.StructData, fdata *typecheck.FieldData) string {
+// 	return "arrayElemSizeOf" + sdata.StructName + fdata.Name
+// }
+
+func (g *Generator) generateFieldMetadataVars(sdata *StructData) error {
+	typeName := sdata.StructName
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+
+	if !g.IsGenericStruct(sdata) {
+		if err := g.addImport(typeName, "", "github.com/visvasity/blockgen/blockgen"); err != nil {
+			return err
+		}
+		if err := g.addImport(typeName, sdata.PkgName, sdata.PkgPath); err != nil {
+			return err
+		}
+
+		g.P(typeName)
+		g.P(typeName, "var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+		g.P(typeName, "var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](nil)")
+
+		if sfdata := g.sliceField(sdata); sfdata != nil {
+			sliceFieldTypeName := g.prepFieldTypeName(sdata, sfdata, "", "", &fieldTypeNameOptions{PkgName: true, TypeArgs: true, TypeArgPkgNames: true})
+			g.P(typeName, "var ", g.sliceDataAlignVarName(sdata), " = blockgen.AlignFor[[]", sliceFieldTypeName, "]()")
+			g.P(typeName, "var ", g.sliceElementSizeVarName(sdata), " = blockgen.ElemSizeFor[[]", sliceFieldTypeName, "]()")
+		}
+		g.P(typeName)
+		return nil
+	}
+
+	g.P(typeName)
+	g.P(typeName, "var ", g.fieldOffsetsMapVarName(sdata), " blockgen.OffsetsMap")
+	g.P(typeName)
+	return nil
+}
+
+func (g *Generator) generateZeroMethods(sdata *StructData) error {
+	typeName := sdata.StructName
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	writerReceiver := g.prepStructTypeName(sdata, "", "Writer", &receiverNameOptions)
+
+	if g.IsGenericStruct(sdata) {
+		if err := g.addImport(typeName, "", "github.com/visvasity/blockgen/blockgen"); err != nil {
+			return err
+		}
+		if err := g.addImport(typeName, sdata.PkgName, sdata.PkgPath); err != nil {
+			return err
+		}
+	}
+
+	g.P(typeName)
+	g.P(typeName, "// IsZero returns true if all underlying bytes are zero.")
+	g.P(typeName, "func (v ", readerReceiver, ") IsZero() bool {")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
+	g.P(typeName, "  return blockgen.IsZero(v[:", g.structSizeVarName(sdata), "])")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "// SetZero sets all underlying bytes to zero.")
+	g.P(typeName, "func (v ", writerReceiver, ") SetZero() {")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
+	g.P(typeName, "  blockgen.SetZero(v.BlockBytes()[:", g.structSizeVarName(sdata), "])")
+	g.P(typeName, "}")
+	g.P(typeName)
+	return nil
+}
+
+func (g *Generator) generateNumberFieldMethods(sdata *StructData, fdata *typecheck.FieldData) error {
+	if fdata.Kind != "basic" {
+		return os.ErrInvalid
+	}
+
+	typeName := sdata.StructName
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	writerReceiver := g.prepStructTypeName(sdata, "", "Writer", &receiverNameOptions)
+	fieldTypeName := g.prepFieldTypeName(sdata, fdata, "", "", &fieldTypeNameOptions{PkgName: true, TypeArgs: true, TypeArgPkgNames: true})
+
+	if fdata.TypePkgName != "" {
+		if err := g.addImport(typeName, fdata.TypePkgName, fdata.TypePkgPath); err != nil {
+			return err
+		}
+	}
+
+	fmethods := basicMethodTypeMap[fdata.BasicKind]
+
+	if !g.IsGenericStruct(sdata) {
+		g.P(typeName)
+		g.P(typeName, "func (v ", readerReceiver, ") ", fdata.FieldName, "() ", fieldTypeName, " {")
+		g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", fdata.Index, "]")
+		g.P(typeName, "  return ", fieldTypeName, "(v.BlockBytes().", fmethods[1], "(offset))")
+		g.P(typeName, "}")
+		g.P(typeName)
+	} else {
+		g.P(typeName)
+		g.P(typeName, "func (v ", readerReceiver, ") ", fdata.FieldName, "() ", fieldTypeName, " {")
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+		g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", fdata.Index, "]")
+		if fdata.BasicKind == "generic" {
+			g.P(typeName, "  return blockgen.NumberAt[", fieldTypeName, "](v.BlockBytes(), offset)")
+		} else {
+			g.P(typeName, "  return ", fieldTypeName, "(v.BlockBytes().", fmethods[1], "(offset))")
+		}
+		g.P(typeName, "}")
+		g.P(typeName)
+	}
+
+	if !g.IsGenericStruct(sdata) {
+		g.P(typeName)
+		g.P(typeName, "func (v ", writerReceiver, ") Set", fdata.FieldName, "(x ", fieldTypeName, ") {")
+		g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", fdata.Index, "]")
+		g.P(typeName, "  v.BlockBytes().", fmethods[2], "(offset, ", fmethods[0], "(x))")
+		g.P(typeName, "}")
+		g.P(typeName)
+	} else {
+		g.P(typeName)
+		g.P(typeName, "func (v ", writerReceiver, ") Set", fdata.FieldName, "(x ", fieldTypeName, ") {")
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+		g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", fdata.Index, "]")
+		if fdata.BasicKind == "generic" {
+			g.P(typeName, "  blockgen.SetNumberAt[", fieldTypeName, "](v.BlockBytes(), offset, x)")
+		} else {
+			g.P(typeName, "  v.BlockBytes().", fmethods[2], "(offset, ", fmethods[0], "(x))")
+		}
+		g.P(typeName, "}")
+		g.P(typeName)
+	}
+	return nil
+}
+
+func (g *Generator) generateStructFieldMethods(sdata *StructData, fdata *typecheck.FieldData) error {
+	if fdata.Kind != "struct" {
+		return os.ErrInvalid
+	}
+
+	typeName := sdata.StructName
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	fieldReaderTypeName := g.prepFieldTypeName(sdata, fdata, "", "Reader", &fieldTypeNameOptions{TypeArgs: true, TypeArgPkgNames: true, IncludeReaderWriterTypeArgs: true})
+	if g.IsGenericTypeParamField(sdata, fdata) {
+		fieldReaderTypeName = fdata.TypeName + "Reader"
+	}
+
+	if fdata.TypePkgName != "" {
+		if err := g.addImport(typeName, fdata.TypePkgName, fdata.TypePkgPath); err != nil {
+			return err
+		}
+	}
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", readerReceiver, ") ", fdata.FieldName, "() ", fieldReaderTypeName, " {")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+	}
+	g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", fdata.Index, "]")
+	g.P(typeName, "  return ", fieldReaderTypeName, "(v.BlockBytes()[offset:])")
+	g.P(typeName, "}")
+	g.P(typeName)
+	return nil
+}
+
+func (g *Generator) generateArrayOfNumbersFieldMethods(sdata *StructData, fdata *typecheck.FieldData) error {
+	if fdata.Kind != "array" || fdata.ArrayKind != "basic" {
+		return os.ErrInvalid
+	}
+
+	typeName := sdata.StructName
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	writerReceiver := g.prepStructTypeName(sdata, "", "Writer", &receiverNameOptions)
+	fieldTypeName := g.prepFieldTypeName(sdata, fdata, "", "", &fieldTypeNameOptions{PkgName: true, TypeArgs: true, TypeArgPkgNames: true})
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", readerReceiver, ") ", fdata.FieldName, "Len() int {")
+	g.P(typeName, "  return int(", fdata.ArrayLens[0], ")")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	if err := g.addImport(typeName, "", "fmt"); err != nil {
+		return err
+	}
+
+	fmethods := basicMethodTypeMap[fdata.BasicKind]
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", readerReceiver, ") ", fdata.FieldName, "ItemAt(i int) ", fieldTypeName, " {")
+	g.P(typeName, "  if i < 0 || i >= v.", fdata.FieldName, "Len() {")
+	g.P(typeName, `    panic(fmt.Sprintf("array index %d is out of range [0:%d]", i, v.`, fdata.FieldName, `Len()))`)
+	g.P(typeName, "  }")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[1]", fieldTypeName, "]()")
+	g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", fdata.Index, "] + i * elemSize")
+	if fdata.BasicKind == "generic" {
+		g.P(typeName, "  return blockgen.NumberAt[", fieldTypeName, "](v.BlockBytes(), offset)")
+	} else {
+		g.P(typeName, "  return ", fieldTypeName, "(v.BlockBytes().", fmethods[1], "(offset))")
+	}
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerReceiver, ") Set", fdata.FieldName, "ItemAt(i int, x ", fieldTypeName, ") {")
+	g.P(typeName, "  if i < 0 || i >= v.", fdata.FieldName, "Len() {")
+	g.P(typeName, `    panic(fmt.Sprintf("array index %d is out of range [0:%d]", i, v.`, fdata.FieldName, `Len()))`)
+	g.P(typeName, "  }")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[1]", fieldTypeName, "]()")
+	g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", fdata.Index, "] + i * elemSize")
+	if fdata.BasicKind == "generic" {
+		g.P(typeName, "  blockgen.SetNumberAt[", fieldTypeName, "](v.BlockBytes(), offset, x)")
+	} else {
+		g.P(typeName, "  v.BlockBytes().", fmethods[2], "(offset, ", fmethods[0], "(x))")
+	}
 	g.P(typeName, "}")
 	g.P(typeName)
 
 	return nil
 }
 
-func (g *Generator) generateZeroMethods(sdata *StructData) error {
+func (g *Generator) generateArrayOfStructsFieldMethods(sdata *StructData, fdata *typecheck.FieldData) error {
+	if fdata.Kind != "array" || fdata.ArrayKind != "struct" {
+		return os.ErrInvalid
+	}
+
 	typeName := sdata.StructName
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	writerReceiver := g.prepStructTypeName(sdata, "", "Writer", &receiverNameOptions)
+	fieldReaderTypeName := g.prepFieldTypeName(sdata, fdata, "", "Reader", &fieldTypeNameOptions{TypeArgs: true, TypeArgPkgNames: true, IncludeReaderWriterTypeArgs: true})
+	if g.IsGenericTypeParamField(sdata, fdata) {
+		fieldReaderTypeName = fdata.TypeName + "Reader" // g.prepFieldTypeName(sdata, fdata, "", "", &structTypeNameOptions{TypeArgs: true})
+	}
 
 	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") IsZero() bool {")
-	g.P(typeName, "  return blockgen.IsZero(v[:", sdata.Size, "])")
+	g.P(typeName, "func (v ", readerReceiver, ") ", fdata.FieldName, "Len() int {")
+	g.P(typeName, "  return int(", fdata.ArrayLens[0], ")")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	if err := g.addImport(typeName, "", "fmt"); err != nil {
+		return err
+	}
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", readerReceiver, ") ", fdata.FieldName, "ItemAt(i int) ", fieldReaderTypeName, " {")
+	g.P(typeName, "  if i < 0 || i >= v.", fdata.FieldName, "Len() {")
+	g.P(typeName, `    panic(fmt.Sprintf("array index %d is out of range [0:%d]", i, v.`, fdata.FieldName, `Len()))`)
+	g.P(typeName, "  }")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[1]", fieldReaderTypeName, "]()")
+	g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", fdata.Index, "] + i * elemSize")
+	g.P(typeName, "  return ", fieldReaderTypeName, "(v.BlockBytes()[offset:])")
 	g.P(typeName, "}")
 	g.P(typeName)
 
 	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") SetZero() {")
-	g.P(typeName, "  blockgen.SetZero(v.BlockBytes()[:", sdata.Size, "])")
+	g.P(typeName, "func (v ", writerReceiver, ") Set", fdata.FieldName, "ItemAt(i int, x ", fieldReaderTypeName, ") {")
+	g.P(typeName, "  if i < 0 || i >= v.", fdata.FieldName, "Len() {")
+	g.P(typeName, `    panic(fmt.Sprintf("array index %d is out of range [0:%d]", i, v.`, fdata.FieldName, `Len()))`)
+	g.P(typeName, "  }")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[1]", fieldReaderTypeName, "]()")
+	g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", fdata.Index, "] + i * elemSize")
+	g.P(typeName, "  copy(v.BlockBytes()[offset:offset+elemSize], x[:elemSize])")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	// TODO: We can add CopyTo and CopyFrom methods as well because these are the builtin types.
+
+	return nil
+}
+
+func (g *Generator) generateSliceMethods(sdata *StructData) error {
+	sfdata := g.sliceField(sdata)
+	if sfdata == nil {
+		return nil
+	}
+
+	typeName := sdata.StructName
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	writerReceiver := g.prepStructTypeName(sdata, "", "Writer", &receiverNameOptions)
+	fieldTypeName := g.prepFieldTypeName(sdata, sfdata, "", "", &fieldTypeNameOptions{PkgName: true, TypeArgs: true, TypeArgPkgNames: true})
+
+	capFuncName := g.prepStructTypeName(sdata, "", "SliceFieldCap", &structTypeNameOptions{TypeConstraints: true, TypeConstraintPkgNames: true})
+
+	g.P(typeName)
+	g.P(typeName, "// ", typeName, "SliceFieldCap returns the slice field capacity for the given underlying byte slice size.")
+	g.P(typeName, "func ", capFuncName, "(nbytes int) int {")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+		g.P(typeName, "  var ", g.sliceElementSizeVarName(sdata), " = blockgen.ElemSizeFor[", fieldTypeName, "]()")
+	}
+	g.P(typeName, "  // TODO: We should also add the required alignment offset to the struct-size.")
+	g.P(typeName, "  return (nbytes - ", g.structSizeVarName(sdata), ") /", g.sliceElementSizeVarName(sdata))
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "// ", sfdata.FieldName, "Len method returns number of elements in the slice field.")
+	g.P(typeName, "func (v ", readerReceiver, ") ", sfdata.FieldName, "Len() int {")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+	}
+	g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", sfdata.Index, "] + blockgen.OffsetOfSliceLen")
+	g.P(typeName, "  return blockgen.IntAt(v.BlockBytes(), offset)")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerReceiver, ") internalSet", sfdata.FieldName, "Len(x int) {")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+	}
+	g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", sfdata.Index, "] + blockgen.OffsetOfSliceLen")
+	g.P(typeName, "  blockgen.SetIntAt(v.BlockBytes(), offset, x)")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "// ", sfdata.FieldName, "Cap method returns maximum number of elements for the slice field.")
+	g.P(typeName, "func (v ", readerReceiver, ") ", sfdata.FieldName, "Cap() int {")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+	}
+	g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", sfdata.Index, "] + blockgen.OffsetOfSliceCap")
+	g.P(typeName, "  return blockgen.IntAt(v.BlockBytes(), offset)")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerReceiver, ") internalSet", sfdata.FieldName, "Cap(x int) {")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.fieldOffsetsVarName(sdata), " = blockgen.OffsetsFor[", inputStructName, "](&", g.fieldOffsetsMapVarName(sdata), ")")
+	}
+	g.P(typeName, "  var offset = ", g.fieldOffsetsVarName(sdata), "[", sfdata.Index, "] + blockgen.OffsetOfSliceCap")
+	g.P(typeName, "  blockgen.SetIntAt(v.BlockBytes(), offset, x)")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerReceiver, ") Resize", sfdata.FieldName, "(size int) int {")
+	g.P(typeName, "  if cap := v.", sfdata.FieldName, "Cap(); size > cap {")
+	g.P(typeName, "    size = cap")
+	g.P(typeName, "  }")
+	g.P(typeName, "  n := v.", sfdata.FieldName, "Len()")
+	g.P(typeName, "  if size == n {")
+	g.P(typeName, "    return size")
+	g.P(typeName, "  }")
+	g.P(typeName, "  if size < n {")
+	g.P(typeName, "    v.Delete", sfdata.FieldName, "Items(size, n)")
+	g.P(typeName, "    return size")
+	g.P(typeName, "  }")
+	g.P(typeName, "  v.internalSet", sfdata.FieldName, "Len(size)")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[]", fieldTypeName, "]()")
+	g.P(typeName, "  var begin = ", g.structSizeVarName(sdata), " + n * elemSize")
+	g.P(typeName, "  var end = ", g.structSizeVarName(sdata), " + size * elemSize")
+	g.P(typeName, "  blockgen.SetZero(v.BlockBytes()[begin:end])")
+	g.P(typeName, "  return size")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerReceiver, ") Delete", sfdata.FieldName, "Items(i, j int) {")
+	g.P(typeName, "  n := v.", sfdata.FieldName, "Len()")
+	g.P(typeName, "  if i < 0 || i >= n {")
+	g.P(typeName, `    panic(fmt.Sprintf("first slice index %d is out of range [0:%d:%d]", i, v.`, sfdata.FieldName, `Len(), v.`, sfdata.FieldName, `Cap()))`)
+	g.P(typeName, "  }")
+	g.P(typeName, "  if j < 0 || j >= n {")
+	g.P(typeName, `    panic(fmt.Sprintf("second slice index %d is out of range [0:%d:%d]", i, v.`, sfdata.FieldName, `Len(), v.`, sfdata.FieldName, `Cap()))`)
+	g.P(typeName, "  }")
+	g.P(typeName, "  if j < i {")
+	g.P(typeName, `    panic(fmt.Sprintf("invalid slice indices %d < %d", j, i))`)
+	g.P(typeName, "  }")
+	g.P(typeName, "  if i == j {")
+	g.P(typeName, "    return")
+	g.P(typeName, "  }")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[]", fieldTypeName, "]()")
+	g.P(typeName)
+	g.P(typeName, "  ioff := ", g.structSizeVarName(sdata), " + i * elemSize")
+	g.P(typeName, "  joff := ", g.structSizeVarName(sdata), " + j * elemSize")
+	g.P(typeName, "  end := ", g.structSizeVarName(sdata), " + n * elemSize")
+	g.P(typeName)
+	g.P(typeName, "  copy(v.BlockBytes()[ioff:end], v.BlockBytes()[joff:end])")
+	g.P(typeName, "  blockgen.SetZero(v.BlockBytes()[end-(joff-ioff):end])")
+	g.P(typeName, "  v.internalSet", sfdata.FieldName, "Len(n-(j-i))")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	return nil
+}
+
+func (g *Generator) generateSliceOfNumbersFieldMethods(sdata *StructData, fdata *typecheck.FieldData) error {
+	if fdata.Kind != "slice" || fdata.SliceKind != "basic" {
+		return os.ErrInvalid
+	}
+
+	typeName := sdata.StructName
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	writerReceiver := g.prepStructTypeName(sdata, "", "Writer", &receiverNameOptions)
+	fieldTypeName := g.prepFieldTypeName(sdata, fdata, "", "", &fieldTypeNameOptions{PkgName: true, TypeArgs: true, TypeArgPkgNames: true})
+
+	fmethods := basicMethodTypeMap[fdata.BasicKind]
+
+	if err := g.addImport(typeName, "", "fmt"); err != nil {
+		return err
+	}
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", readerReceiver, ") ", fdata.FieldName, "ItemAt(i int) ", fieldTypeName, " {")
+	g.P(typeName, "  if i < 0 || i >= v.", fdata.FieldName, "Len() {")
+	g.P(typeName, `    panic(fmt.Sprintf("slice index %d is out of range [:%d:%d]", i, v.`, fdata.FieldName, `Len(), v.`, fdata.FieldName, `Cap()))`)
+	g.P(typeName, "  }")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[]", fieldTypeName, "]()")
+	g.P(typeName, "  var offset = ", g.structSizeVarName(sdata), " + i * elemSize")
+	if fdata.BasicKind == "generic" {
+		g.P(typeName, "  return blockgen.NumberAt[", fieldTypeName, "](v.BlockBytes(), offset)")
+	} else {
+		g.P(typeName, "  return ", fieldTypeName, "(v.BlockBytes().", fmethods[1], "(offset))")
+	}
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerReceiver, ") Set", fdata.FieldName, "ItemAt(i int, x ", fieldTypeName, ") {")
+	g.P(typeName, "  if i < 0 || i >= v.", fdata.FieldName, "Len() {")
+	g.P(typeName, `    panic(fmt.Sprintf("slice index %d is out of range [:%d:%d]", i, v.`, fdata.FieldName, `Len(), v.`, fdata.FieldName, `Cap()))`)
+	g.P(typeName, "  }")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[]", fieldTypeName, "]()")
+	g.P(typeName, "  var offset = ", g.structSizeVarName(sdata), " + i * elemSize")
+	if fdata.BasicKind == "generic" {
+		g.P(typeName, "  blockgen.SetNumberAt[", fieldTypeName, "](v.BlockBytes(), offset, x)")
+	} else {
+		g.P(typeName, "  v.BlockBytes().", fmethods[2], "(offset, ", fmethods[0], "(x))")
+	}
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerReceiver, ") Append", fdata.FieldName, "Item(x ", fieldTypeName, ") {")
+	g.P(typeName, "  n := v.", fdata.FieldName, "Len()")
+	g.P(typeName, "  if n == v.", fdata.FieldName, "Cap() {")
+	g.P(typeName, `    panic(fmt.Sprintf("append to slice overflows the maximum capacity [::%d]", v.`, fdata.FieldName, `Cap()))`)
+	g.P(typeName, "  }")
+	g.P(typeName, "  v.internalSet", fdata.FieldName, "Len(n+1)")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[]", fieldTypeName, "]()")
+	g.P(typeName, "  var offset = ", g.structSizeVarName(sdata), " + n * elemSize")
+	if fdata.BasicKind == "generic" {
+		g.P(typeName, "  blockgen.SetNumberAt[", fieldTypeName, "](v.BlockBytes(), offset, x)")
+	} else {
+		g.P(typeName, "  v.BlockBytes().", fmethods[2], "(offset, ", fmethods[0], "(x))")
+	}
+	g.P(typeName, "}")
+	g.P(typeName)
+	return nil
+}
+
+func (g *Generator) generateSliceOfStructsFieldMethods(sdata *StructData, fdata *typecheck.FieldData) error {
+	if fdata.Kind != "slice" || fdata.SliceKind != "struct" {
+		return os.ErrInvalid
+	}
+
+	typeName := sdata.StructName
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	writerReceiver := g.prepStructTypeName(sdata, "", "Writer", &receiverNameOptions)
+	fieldTypeName := g.prepFieldTypeName(sdata, fdata, "", "", &fieldTypeNameOptions{PkgName: true, TypeArgs: true, TypeArgPkgNames: true})
+	fieldReaderTypeName := g.prepFieldTypeName(sdata, fdata, "", "Reader", &fieldTypeNameOptions{TypeArgs: true, TypeArgPkgNames: true, IncludeReaderWriterTypeArgs: true})
+	if g.IsGenericTypeParamField(sdata, fdata) {
+		fieldReaderTypeName = fdata.TypeName + "Reader"
+	}
+	// fieldWriterTypeName := g.prepFieldTypeName(sdata, fdata, "", "Writer", &fieldTypeNameOptions{TypeArgs: true, TypeArgPkgNames: true, IncludeReaderWriterTypeArgs: true})
+	// if g.IsGenericTypeParamField(sdata, fdata) {
+	// 	fieldReaderTypeName = fdata.TypeName + "Reader"
+	// }
+
+	if err := g.addImport(typeName, "", "fmt"); err != nil {
+		return err
+	}
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", readerReceiver, ") ", fdata.FieldName, "ItemAt(i int) ", fieldReaderTypeName, " {")
+	g.P(typeName, "  if i < 0 || i >= v.", fdata.FieldName, "Len() {")
+	g.P(typeName, `    panic(fmt.Sprintf("slice index %d is out of range [:%d:%d]", i, v.`, fdata.FieldName, `Len(), v.`, fdata.FieldName, `Cap()))`)
+	g.P(typeName, "  }")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[]", fieldTypeName, "]()")
+	g.P(typeName, "  var offset = ", g.structSizeVarName(sdata), " + i * elemSize")
+	g.P(typeName, "  return ", fieldReaderTypeName, "(v.BlockBytes()[offset:])")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerReceiver, ") Set", fdata.FieldName, "ItemAt(i int, x ", fieldReaderTypeName, ") {")
+	g.P(typeName, "  if i < 0 || i >= v.", fdata.FieldName, "Len() {")
+	g.P(typeName, `    panic(fmt.Sprintf("slice index %d is out of range [:%d:%d]", i, v.`, fdata.FieldName, `Len(), v.`, fdata.FieldName, `Cap()))`)
+	g.P(typeName, "  }")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[]", fieldTypeName, "]()")
+	g.P(typeName, "  var offset = ", g.structSizeVarName(sdata), " + i * elemSize")
+	g.P(typeName, "  copy(v.BlockBytes()[offset:offset+elemSize], x.BlockBytes()[:elemSize])")
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerReceiver, ") Append", fdata.FieldName, "Item(x ", fieldReaderTypeName, ") {")
+	g.P(typeName, "  n := v.", fdata.FieldName, "Len()")
+	g.P(typeName, "  if n == v.", fdata.FieldName, "Cap() {")
+	g.P(typeName, `    panic(fmt.Sprintf("append to slice overflows the maximum capacity [::%d]", v.`, fdata.FieldName, `Cap()))`)
+	g.P(typeName, "  }")
+	g.P(typeName, "  v.internalSet", fdata.FieldName, "Len(n+1)")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
+	g.P(typeName, "  var elemSize = blockgen.ElemSizeFor[[]", fieldTypeName, "]()")
+	g.P(typeName, "  var offset = ", g.structSizeVarName(sdata), " + n * elemSize")
+	g.P(typeName, "  if x == nil {")
+	g.P(typeName, "    blockgen.SetZero(v.BlockBytes()[offset:offset+elemSize])")
+	g.P(typeName, "  } else {")
+	g.P(typeName, "    copy(v.BlockBytes()[offset:offset+elemSize], x.BlockBytes()[:elemSize])")
+	g.P(typeName, "  }")
 	g.P(typeName, "}")
 	g.P(typeName)
 	return nil
 }
 
 func (g *Generator) generateNewAndOpenMethods(typeName string) error {
-	sdata, err := g.getStructData(typeName)
-	if err != nil {
-		return err
-	}
-	readerTypeName := g.readerName(typeName)
-
-	if err := g.addImport(typeName, "", "fmt"); err != nil {
-		return err
+	sdata, ok := g.structDataMap[typeName]
+	if !ok {
+		return os.ErrNotExist
 	}
 
-	if sdata.HasSliceField() {
-		fdata := sdata.FieldList[len(sdata.FieldList)-1]
-		g.P(typeName)
-		g.P(typeName, "func ", readerTypeName, fdata.Name, "CapForNumBytes(nbytes int) int {")
-		g.P(typeName, "  return (nbytes - ", sdata.Size, ") /", fdata.ElementSize)
-		g.P(typeName, "}")
-		g.P(typeName)
-	}
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+	readerName := g.prepStructTypeName(sdata, "", "Reader", nil)
+	inputDefinition := g.prepStructTypeName(sdata, "", "", &structTypeNameOptions{TypeConstraints: true, TypeConstraintPkgNames: true, IncludeReaderWriterTypeParams: true})
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	// writerReceiver := g.prepStructTypeName(sdata, "", "Writer", &receiverNameOptions)
+
+	capFuncCallName := g.prepStructTypeName(sdata, "", "SliceFieldCap", &structTypeNameOptions{TypeParams: true})
 
 	g.P(typeName)
-	g.P(typeName, "// New", readerTypeName, " creates a zero-initialized ", typeName, ". Returns nil if input block size is too small.")
-	g.P(typeName, "func New", readerTypeName, "(block []byte) ", readerTypeName, " {")
+	g.P(typeName, "// New", readerName, " creates a zero-initialized ", typeName, ". Returns nil if input block size is too small.")
+	g.P(typeName, "func New", inputDefinition, "(block []byte) ", readerReceiver, " {")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
 	g.P(typeName, "  size := len(block)")
-	g.P(typeName, "  if size < ", sdata.Size, " {")
+	g.P(typeName, "  if size < ", g.structSizeVarName(sdata), " {")
 	g.P(typeName, "    return nil")
 	g.P(typeName, "  }")
 	g.P(typeName, "  blockgen.SetZero(block)")
-	g.P(typeName, "  v := ", readerTypeName, "(block)")
-	if sdata.HasSliceField() {
-		fdata := sdata.FieldList[len(sdata.FieldList)-1]
-		g.P(typeName, "  // ", readerTypeName, " type has a slice field; we must set a cap on it.")
-		g.P(typeName, "  n := (size - ", sdata.Size, ") / ", fdata.ElementSize)
-		g.P(typeName, "  v.Writer().internalSet", fdata.Name, "Cap(n)")
+	g.P(typeName, "  v := ", readerReceiver, "(block)")
+
+	if sfdata := g.sliceField(sdata); sfdata != nil {
+		g.P(typeName, "  // ", typeName, " type has a slice field; we must set a cap on it.")
+		g.P(typeName, "  n := ", capFuncCallName, "(size)")
+		g.P(typeName, "  v.Writer().internalSet", sfdata.FieldName, "Cap(n)")
 	}
 	g.P(typeName, "  return v")
 	g.P(typeName, "}")
 	g.P(typeName)
 
+	if err := g.addImport(typeName, "", "fmt"); err != nil {
+		return err
+	}
+
 	g.P(typeName)
-	g.P(typeName, "func Open", readerTypeName, "(block []byte) (", readerTypeName, ", error) {")
+	g.P(typeName, "// Open", readerName, " parses and prepares an existing ", typeName, " for read/write access.")
+	g.P(typeName, "func Open", inputDefinition, "(block []byte) (", readerReceiver, ", error) {")
+	if g.IsGenericStruct(sdata) {
+		g.P(typeName, "  var ", g.structSizeVarName(sdata), " = blockgen.SizeFor[", inputStructName, "]()")
+	}
 	g.P(typeName, "  size := len(block)")
-	g.P(typeName, "  if size < ", sdata.Size, " {")
+	g.P(typeName, "  if size < ", g.structSizeVarName(sdata), " {")
 	g.P(typeName, `    return nil, fmt.Errorf("input size is too small")`)
 	g.P(typeName, "  }")
-	g.P(typeName, "  v := ", readerTypeName, "(block)")
-	if sdata.HasSliceField() {
-		fdata := sdata.FieldList[len(sdata.FieldList)-1]
-		g.P(typeName, "  // ", readerTypeName, " type has a slice field; validate it's len and cap.")
-		g.P(typeName, "  n := (size - ", sdata.Size, ") / ", fdata.ElementSize)
-		g.P(typeName, "  if x := v.", fdata.Name, "Cap(); x != n {")
+	g.P(typeName, "  v := ", readerReceiver, "(block)")
+	if sfdata := g.sliceField(sdata); sfdata != nil {
+		g.P(typeName, "  // ", typeName, " type has a slice field; validate it's len and cap.")
+		g.P(typeName, "  n := ", capFuncCallName, "(size)")
+		g.P(typeName, "  if x := v.", sfdata.FieldName, "Cap(); x != n {")
 		g.P(typeName, `    return nil, fmt.Errorf("slice field cap must be %d, found %d", n, x)`)
 		g.P(typeName, "  }")
-		g.P(typeName, "  if x := v.", fdata.Name, "Len(); x < 0 || x > n {")
+		g.P(typeName, "  if x := v.", sfdata.FieldName, "Len(); x < 0 || x > n {")
 		g.P(typeName, `    return nil, fmt.Errorf("slice field len is %d, must be between [%d-%d)", x, 0, n)`)
 		g.P(typeName, "  }")
 	}
@@ -1074,600 +1447,9 @@ func (g *Generator) generateNewAndOpenMethods(typeName string) error {
 	return nil
 }
 
-func (g *Generator) generateBasicMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	fmethods := fixedBasicTypeMap[basicKindMap[fdata.Kind]]
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "() ", fdata.Kind, " {")
-	g.P(typeName, "  return v.BlockBytes().", fmethods[1], "(", fdata.Offset, ")")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Set", fdata.Name, "(x ", fdata.Kind, ") {")
-	g.P(typeName, "  v.BlockBytes().", fmethods[2], "(", fdata.Offset, ", x)")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateBasicNamedMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	if err := g.addAlias(fdata.TypeName, fdata.TypePkgName, fdata.TypePkgPath); err != nil {
-		return err
-	}
-
-	fmethods := fixedBasicTypeMap[basicKindMap[fdata.Kind]]
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "() ", fdata.TypeName, " {")
-	g.P(typeName, "  return ", fdata.TypeName, "(v.BlockBytes().", fmethods[1], "(", fdata.Offset, "))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Set", fdata.Name, "(x ", fdata.TypeName, ") {")
-	g.P(typeName, "  v.BlockBytes().", fmethods[2], "(", fdata.Offset, ", ", fdata.Kind, "(x))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateBasicArrayMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	if err := g.addImport(typeName, "", "fmt"); err != nil {
-		return err
-	}
-
-	fmethods := fixedBasicTypeMap[basicKindMap[fdata.ElementKind]]
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "Len() int {")
-	g.P(typeName, "  return int(", fdata.Length, ")")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "ItemAt(i int) ", fdata.ElementKind, " {")
-	g.P(typeName, "  if i < 0 || i >= v.", fdata.Name, "Len() {")
-	g.P(typeName, `    panic(fmt.Sprintf("array index %d is out of range [0:%d]", i, v.`, fdata.Name, `Len()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  return v.BlockBytes().", fmethods[1], "(", fdata.Offset, "+ i * ", fdata.ElementSize, ")")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Set", fdata.Name, "ItemAt(i int, x ", fdata.ElementKind, ") {")
-	g.P(typeName, "  if i < 0 || i >= v.", fdata.Name, "Len() {")
-	g.P(typeName, `    panic(fmt.Sprintf("array index %d is out of range [0:%d]", i, v.`, fdata.Name, `Len()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  v.BlockBytes().", fmethods[2], "(", fdata.Offset, "+ i * ", fdata.ElementSize, ", x)")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	// TODO: We can add CopyTo and CopyFrom methods as well because these are the builtin types.
-
-	return nil
-}
-
-func (g *Generator) generateBasicNamedArrayMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	if err := g.addImport(typeName, "", "fmt"); err != nil {
-		return err
-	}
-	if err := g.addAlias(fdata.TypeName, fdata.TypePkgName, fdata.TypePkgPath); err != nil {
-		return err
-	}
-
-	fmethods := fixedBasicTypeMap[basicKindMap[fdata.ElementKind]]
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "Len() int {")
-	g.P(typeName, "  return int(", fdata.Length, ")")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "ItemAt(i int) ", fdata.TypeName, " {")
-	g.P(typeName, "  if i < 0 || i >= v.", fdata.Name, "Len() {")
-	g.P(typeName, `    panic(fmt.Sprintf("array index %d is out of range [0:%d]", i, v.`, fdata.Name, `Len()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  return ", fdata.TypeName, "(v.BlockBytes().", fmethods[1], "(", fdata.Offset, "+ i * ", fdata.ElementSize, "))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Set", fdata.Name, "ItemAt(i int, x ", fdata.TypeName, ") {")
-	g.P(typeName, "  if i < 0 || i >= v.", fdata.Name, "Len() {")
-	g.P(typeName, `    panic(fmt.Sprintf("array index %d is out of range [0:%d]", i, v.`, fdata.Name, `Len()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  v.BlockBytes().", fmethods[2], "(", fdata.Offset, "+ i * ", fdata.ElementSize, ", ", fmethods[0], "(x))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateAssignArrayMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	elemType := fdata.TypeName
-	if len(elemType) == 0 {
-		elemType = fdata.ElementKind
-	}
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "() (xs [", fdata.Length, "]", elemType, ") {")
-	g.P(typeName, "  for i := range xs {")
-	g.P(typeName, "    xs[i] = v.", fdata.Name, "ItemAt(i)")
-	g.P(typeName, "  }")
-	g.P(typeName, "  return")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Set", fdata.Name, "(xs [", fdata.Length, "]", elemType, ") {")
-	g.P(typeName, "  for i := range xs {")
-	g.P(typeName, "    v.Set", fdata.Name, "ItemAt(i, xs[i])")
-	g.P(typeName, "  }")
-	g.P(typeName, "  return")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateNamedStructArrayMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-
-	if err := g.addImport(typeName, "", "fmt"); err != nil {
-		return err
-	}
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "Len() int {")
-	g.P(typeName, "  return int(", fdata.Length, ")")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "ItemAt(i int) ", fdata.TypeName, " {")
-	g.P(typeName, "  if i < 0 || i >= v.", fdata.Name, "Len() {")
-	g.P(typeName, `    panic(fmt.Sprintf("array index %d is out of range [0:%d]", i, v.`, fdata.Name, `Len()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  return ", fdata.TypeName, "([", fdata.Offset, "+ i * ", fdata.ElementSize, ":])")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateStructMethods(sdata *StructData, findex int) error {
-	typeName := sdata.StructName
-	fdata := sdata.FieldList[findex]
-
-	readerTypeName := g.readerName(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "() ", fdata.TypeName, " {")
-	g.P(typeName, "  return ", fdata.TypeName, "(v.BlockBytes()[", fdata.Offset, ":])")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateSliceMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	// A slice holds 3 WORDs [pointer,len,cap]. We use the two words: len and
-	// cap. WORD size is different based on the Compiler and GOARCH values, so we
-	// must pick methods appropriately.
-	wordsize := fdata.Size / 3
-
-	var xmethods [3]string
-	switch wordsize {
-	case 8:
-		xmethods = [3]string{"int64", "Int64At", "SetInt64At"}
-	case 4:
-		xmethods = [3]string{"int32", "Int32At", "SetInt32At"}
-	case 2:
-		xmethods = [3]string{"int16", "Int16At", "SetInt16At"}
-	case 1:
-		xmethods = [3]string{"int8", "Int8At", "SetInt8At"}
-	}
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "Len() int {")
-	g.P(typeName, "  return int(v.BlockBytes().", xmethods[1], "(", fdata.Offset+1*wordsize, "))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "Cap() int {")
-	g.P(typeName, "  return int(v.BlockBytes().", xmethods[1], "(", fdata.Offset+2*wordsize, "))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") internalSet", fdata.Name, "Len(x int) {")
-	g.P(typeName, "  v.BlockBytes().", xmethods[2], "(", fdata.Offset+1*wordsize, ", ", xmethods[0], "(x))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") internalSet", fdata.Name, "Cap(x int) {")
-	g.P(typeName, "  v.BlockBytes().", xmethods[2], "(", fdata.Offset+2*wordsize, ", ", xmethods[0], "(x))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateBasicSliceMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	if err := g.addImport(typeName, "", "fmt"); err != nil {
-		return err
-	}
-
-	fmethods := fixedBasicTypeMap[basicKindMap[fdata.ElementKind]]
-
-	base := fdata.Offset + fdata.Size
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "ItemAt(i int) ", fdata.ElementKind, " {")
-	g.P(typeName, "  if i < 0 || i >= v.", fdata.Name, "Len() {")
-	g.P(typeName, `    panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  return v.BlockBytes().", fmethods[1], "(", base, "+ i * ", fdata.ElementSize, ")")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Set", fdata.Name, "ItemAt(i int, x ", fdata.ElementKind, ") {")
-	g.P(typeName, "  if i < 0 || i >= v.", fdata.Name, "Len() {")
-	g.P(typeName, `    panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  v.BlockBytes().", fmethods[2], "(", base, "+ i * ", fdata.ElementSize, ", x)")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Append", fdata.Name, "(x ", fdata.ElementKind, ") {")
-	g.P(typeName, "  n := v.", fdata.Name, "Len()")
-	g.P(typeName, "  if n == v.", fdata.Name, "Cap() {")
-	g.P(typeName, `    panic(fmt.Sprintf("slice is already full with %d items", n))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  v.internalSet", fdata.Name, "Len(n+1)")
-	g.P(typeName, "  v.BlockBytes().", fmethods[2], "(", base, "+ n * ", fdata.ElementSize, ", x)")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	// TODO: We can add CopyTo and CopyFrom methods as well because these are the builtin types.
-
-	return nil
-}
-
-func (g *Generator) generateBasicNamedSliceMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	if err := g.addImport(typeName, "", "fmt"); err != nil {
-		return err
-	}
-	if err := g.addAlias(fdata.TypeName, fdata.TypePkgName, fdata.TypePkgPath); err != nil {
-		return err
-	}
-
-	base := fdata.Offset + fdata.Size
-	fmethods := fixedBasicTypeMap[basicKindMap[fdata.ElementKind]]
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "ItemAt(i int) ", fdata.TypeName, " {")
-	g.P(typeName, "  if i < 0 || i >= v.", fdata.Name, "Len() {")
-	g.P(typeName, `    panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  return ", fdata.TypeName, "(v.BlockBytes().", fmethods[1], "(", base, "+ i * ", fdata.ElementSize, "))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Set", fdata.Name, "ItemAt(i int, x ", fdata.TypeName, ") {")
-	g.P(typeName, "  if i < 0 || i >= v.", fdata.Name, "Len() {")
-	g.P(typeName, `    panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  v.BlockBytes().", fmethods[2], "(", base, "+ i * ", fdata.ElementSize, ", ", fdata.ElementKind, "(x))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Append", fdata.Name, "(x ", fdata.TypeName, ") {")
-	g.P(typeName, "  n := v.", fdata.Name, "Len()")
-	g.P(typeName, "  if n == v.", fdata.Name, "Cap() {")
-	g.P(typeName, `    panic(fmt.Sprintf("slice is already full with %d items", n))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  v.internalSet", fdata.Name, "Len(n+1)")
-	g.P(typeName, "  v.BlockBytes().", fmethods[2], "(", base, "+ n * ", fdata.ElementSize, ", ", fdata.ElementKind, "(x))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateNamedStructSliceMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	if err := g.addImport(typeName, "", "fmt"); err != nil {
-		return err
-	}
-
-	base := fdata.Offset + fdata.Size
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") ", fdata.Name, "ItemAt(i int) ", fdata.TypeName, " {")
-	g.P(typeName, "  if i < 0 || i >= v.", fdata.Name, "Len() {")
-	g.P(typeName, `    panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  return ", fdata.TypeName, "(v[", base, " + i * ", fdata.ElementSize, ":])")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Append", fdata.Name, "() ", g.writerName(fdata.TypeName), " {")
-	g.P(typeName, "  n := v.", fdata.Name, "Len()")
-	g.P(typeName, "  if n == v.", fdata.Name, "Cap() {")
-	g.P(typeName, `    panic(fmt.Sprintf("slice is already full with %d items", n))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  v.internalSet", fdata.Name, "Len(n+1)")
-	g.P(typeName, "  return v.", fdata.Name, "ItemAt(n).Writer()")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateSliceRemoveMethod(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	writerTypeName := g.writerName(typeName)
-
-	elementType := fdata.TypeName
-	if elementType == "" {
-		elementType = fdata.ElementKind
-	}
-
-	base := fdata.Offset
-	if fdata.Length < 0 {
-		base += fdata.Size
-	}
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Remove", fdata.Name, "ItemAt(i int) {")
-	g.P(typeName, "  n := v.", fdata.Name, "Len()")
-	g.P(typeName, "  if i < 0 || i >= n {")
-	g.P(typeName, `    panic(fmt.Sprintf("slice index %d is out of range [0:%d:%d]", i, v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  beg := ", base, "+i*", fdata.ElementSize)
-	g.P(typeName, "  end := ", base, "+n*", fdata.ElementSize)
-	g.P(typeName, "  copy(v.BlockBytes()[beg:], v.BlockBytes()[beg+", fdata.ElementSize, ":end])")
-	g.P(typeName, "  blockgen.SetZero(v.BlockBytes()[end-", fdata.ElementSize, ":end])")
-	g.P(typeName, "  v.internalSet", fdata.Name, "Len(n-1)")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Delete", fdata.Name, "Items(i, j int) {")
-	g.P(typeName, "  n := v.", fdata.Name, "Len()")
-	g.P(typeName, "  if i < 0 || i >= n {")
-	g.P(typeName, `    panic(fmt.Sprintf("first slice index %d is out of range [0:%d:%d]", i, v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  if j < 0 || j >= n {")
-	g.P(typeName, `    panic(fmt.Sprintf("second slice index %d is out of range [0:%d:%d]", i, v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap()))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  if j < i {")
-	g.P(typeName, `    panic(fmt.Sprintf("invalid slice indices %d < %d", j, i))`)
-	g.P(typeName, "  }")
-	g.P(typeName, "  if i == j {")
-	g.P(typeName, "    return")
-	g.P(typeName, "  }")
-	g.P(typeName, "  ioff := ", base, "+i*", fdata.ElementSize)
-	g.P(typeName, "  joff := ", base, "+j*", fdata.ElementSize)
-	g.P(typeName, "  end := ", base, "+n*", fdata.ElementSize)
-	g.P(typeName, "  copy(v.BlockBytes()[ioff:end], v.BlockBytes()[joff:end])")
-	g.P(typeName, "  blockgen.SetZero(v.BlockBytes()[end-(joff-ioff):end])")
-	g.P(typeName, "  v.internalSet", fdata.Name, "Len(n-(j-i))")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateIteratorMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-
-	if err := g.addImport(typeName, "", "iter"); err != nil {
-		return err
-	}
-
-	elementType := fdata.TypeName
-	if elementType == "" {
-		elementType = fdata.ElementKind
-	}
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") All", fdata.Name, "() iter.Seq2[int,", elementType, "] {")
-	g.P(typeName, "  return func(yield func(int, ", elementType, ") bool) {")
-	g.P(typeName, "    for i := 0; i < v.", fdata.Name, "Len(); i++ {")
-	g.P(typeName, "      if !yield(i, v.", fdata.Name, "ItemAt(i)) {")
-	g.P(typeName, "        return")
-	g.P(typeName, "      }")
-	g.P(typeName, "    }")
-	g.P(typeName, "  }")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateCommonTypeAliases() {
-	keys := slices.Collect(maps.Keys(g.aliasPkgMap))
-	slices.Sort(keys)
-
-	g.P("")
-	g.P("", "type (")
-	for _, k := range keys {
-		v := g.aliasPkgMap[k]
-		g.P("", "  ", k, " = ", v, ".", k)
-	}
-	g.P("", ")")
-	g.P("")
-}
-
-func (g *Generator) generateCoalesceMethod(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	writerTypeName := g.writerName(typeName)
-
-	elementType := fdata.TypeName
-	if elementType == "" {
-		elementType = fdata.ElementKind
-	}
-
-	base := fdata.Offset
-	if fdata.Length < 0 {
-		base += fdata.Size
-	}
-
-	freader := g.readerName(elementType)
-	fwriter := g.writerName(elementType)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Coalesce", fdata.Name, "Func(merge func(w ", fwriter, ", r ", freader, ") bool) int {")
-	g.P(typeName, "  nmerges := 0")
-	g.P(typeName, "  for i := 0; i < v.", fdata.Name, "Len()-1; {")
-	g.P(typeName, "    if merge(v.", fdata.Name, "ItemAt(i).Writer(), v.", fdata.Name, "ItemAt(i+1)) {")
-	g.P(typeName, "      v.Remove", fdata.Name, "ItemAt(i + 1)")
-	g.P(typeName, "      nmerges++")
-	g.P(typeName, "      continue")
-	g.P(typeName, "    }")
-	g.P(typeName, "    i++")
-	g.P(typeName, "  }")
-	g.P(typeName, "  return nmerges")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateSortAndFindMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	if err := g.addImport(typeName, "", "sort"); err != nil {
-		return err
-	}
-
-	elementType := fdata.TypeName
-	if elementType == "" {
-		elementType = fdata.ElementKind
-	}
-
-	base := fdata.Offset
-	if fdata.Length < 0 {
-		base += fdata.Size
-	}
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Swap", fdata.Name, "Items(i, j int) {")
-	g.P(typeName, "  tmp := make([]byte, ", fdata.ElementSize, ")")
-	g.P(typeName, "  ioff := ", base, "+ i * ", fdata.ElementSize)
-	g.P(typeName, "  joff := ", base, "+ j * ", fdata.ElementSize)
-	g.P(typeName, "  copy(tmp, v.BlockBytes()[ioff:ioff+", fdata.ElementSize, "])")
-	g.P(typeName, "  copy(v.BlockBytes()[ioff:ioff+", fdata.ElementSize, "], v.BlockBytes()[joff:joff+", fdata.ElementSize, "])")
-	g.P(typeName, "  copy(v.BlockBytes()[joff:joff+", fdata.ElementSize, "], tmp)")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Sort", fdata.Name, "Func(cmp func(a, b ", elementType, ") int) {")
-	g.P(typeName, "  helper := blockgen.SortHelper{")
-	g.P(typeName, "    LenFunc: v.", fdata.Name, "Len,")
-	g.P(typeName, "    SwapFunc: v.Swap", fdata.Name, "Items,")
-	g.P(typeName, "    CompareFunc: func(i,j int)int{return cmp(v.", fdata.Name, "ItemAt(i), v.", fdata.Name, "ItemAt(j))},")
-	g.P(typeName, "  }")
-	g.P(typeName, "  sort.Sort(&helper)")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") Find", fdata.Name, "Func(cmp func(x ", elementType, ") int) (int, bool) {")
-	g.P(typeName, "  return sort.Find(v.", fdata.Name, "Len(), func(i int) int { return cmp(v.", fdata.Name, "ItemAt(i)) })")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
-func (g *Generator) generateCopyMethods(sdata *StructData, findex int) error {
-	typeName, fdata := sdata.StructName, sdata.FieldList[findex]
-	readerTypeName := g.readerName(typeName)
-	writerTypeName := g.writerName(typeName)
-
-	elementType := fdata.TypeName
-	if elementType == "" {
-		elementType = fdata.ElementKind
-	}
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") Copy", fdata.Name, "To(xs []", elementType, ") {")
-	g.P(typeName, "  n := min(len(xs), v.", fdata.Name, "Len())")
-	g.P(typeName, "  for i := 0; i < n; i++ {")
-	g.P(typeName, "    xs[i] = v.", fdata.Name, "ItemAt(i)")
-	g.P(typeName, "  }")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	g.P(typeName)
-	g.P(typeName, "func (v ", writerTypeName, ") Copy", fdata.Name, "From(xs []", elementType, ") {")
-	g.P(typeName, "  n := min(len(xs), v.", fdata.Name, "Len())")
-	g.P(typeName, "  for i := 0; i < n; i++ {")
-	g.P(typeName, "    v.Set", fdata.Name, "ItemAt(i, xs[i])")
-	g.P(typeName, "  }")
-	g.P(typeName, "}")
-	g.P(typeName)
-
-	return nil
-}
-
 func (g *Generator) generatePrintMethods(sdata *StructData) error {
 	typeName := sdata.StructName
-	readerTypeName := g.readerName(typeName)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
 
 	if err := g.addImport(typeName, "", "strings"); err != nil {
 		return err
@@ -1677,61 +1459,133 @@ func (g *Generator) generatePrintMethods(sdata *StructData) error {
 	}
 
 	g.P(typeName)
-	g.P(typeName, "func (v ", readerTypeName, ") String() string {")
+	g.P(typeName, "func (v ", readerReceiver, ") String() string {")
 	g.P(typeName, "  var sb strings.Builder")
-	for i, fdata := range sdata.FieldList {
+	for i, fdata := range sdata.Fields {
 		if i != 0 {
 			g.P(typeName, `  fmt.Fprintf(&sb, " ")`)
 		}
 
 		switch fdata.Kind {
+		case "basic":
+			g.P(typeName, `  fmt.Fprintf(&sb, "`, fdata.FieldName, `=%d", v.`, fdata.FieldName, `())`)
+		case "struct":
+			g.P(typeName, `  fmt.Fprintf(&sb, "`, fdata.FieldName, `={%v}", v.`, fdata.FieldName, `())`)
 		case "array":
-			if fdata.ElementKind == "uint8" {
-				g.P(typeName, `  fmt.Fprintf(&sb, "`, fdata.Name, `=[%d]{%x}", v.`, fdata.Name, `Len(), v.`, fdata.Name, `())`)
-				continue
-			}
-			g.P(typeName, `  fmt.Fprintf(&sb, "`, fdata.Name, `=[%d]{", v.`, fdata.Name, `Len())`)
-			g.P(typeName, `  for i := 0; i < v.`, fdata.Name, `Len(); i++ {`)
+			g.P(typeName, `  fmt.Fprintf(&sb, "`, fdata.FieldName, `=[%d]{", v.`, fdata.FieldName, `Len())`)
+			g.P(typeName, `  for i := 0; i < v.`, fdata.FieldName, `Len(); i++ {`)
 			g.P(typeName, `    if i == 0 {`)
-			if fdata.ElementKind != "" {
-				g.P(typeName, `      fmt.Fprintf(&sb, "%d", v.`, fdata.Name, `ItemAt(i))`)
+			if fdata.ArrayKind == "basic" {
+				g.P(typeName, `      fmt.Fprintf(&sb, "%d", v.`, fdata.FieldName, `ItemAt(i))`)
 			} else {
-				g.P(typeName, `      fmt.Fprintf(&sb, "{%v}", v.`, fdata.Name, `ItemAt(i))`)
+				g.P(typeName, `      fmt.Fprintf(&sb, "{%v}", v.`, fdata.FieldName, `ItemAt(i))`)
 			}
 			g.P(typeName, `    } else {`)
-			if fdata.ElementKind != "" {
-				g.P(typeName, `      fmt.Fprintf(&sb, " %d", v.`, fdata.Name, `ItemAt(i))`)
+			if fdata.ArrayKind == "basic" {
+				g.P(typeName, `      fmt.Fprintf(&sb, " %d", v.`, fdata.FieldName, `ItemAt(i))`)
 			} else {
-				g.P(typeName, `      fmt.Fprintf(&sb, " {%v}", v.`, fdata.Name, `ItemAt(i))`)
+				g.P(typeName, `      fmt.Fprintf(&sb, " {%v}", v.`, fdata.FieldName, `ItemAt(i))`)
 			}
 			g.P(typeName, `    }`)
 			g.P(typeName, `  }`)
 			g.P(typeName, `  fmt.Fprintf(&sb, "}")`)
 		case "slice":
-			g.P(typeName, `  fmt.Fprintf(&sb, "`, fdata.Name, `=[:%d:%d]{", v.`, fdata.Name, `Len(), v.`, fdata.Name, `Cap())`)
-			g.P(typeName, `  for i := 0; i < v.`, fdata.Name, `Len(); i++ {`)
+			g.P(typeName, `  fmt.Fprintf(&sb, "`, fdata.FieldName, `=[:%d:%d]{", v.`, fdata.FieldName, `Len(), v.`, fdata.FieldName, `Cap())`)
+			g.P(typeName, `  for i := 0; i < v.`, fdata.FieldName, `Len(); i++ {`)
 			g.P(typeName, `    if i == 0 {`)
-			if fdata.ElementKind != "" {
-				g.P(typeName, `      fmt.Fprintf(&sb, "%d", v.`, fdata.Name, `ItemAt(i))`)
+			if fdata.SliceKind == "basic" {
+				g.P(typeName, `      fmt.Fprintf(&sb, "%d", v.`, fdata.FieldName, `ItemAt(i))`)
 			} else {
-				g.P(typeName, `      fmt.Fprintf(&sb, "{%v}", v.`, fdata.Name, `ItemAt(i))`)
+				g.P(typeName, `      fmt.Fprintf(&sb, "{%v}", v.`, fdata.FieldName, `ItemAt(i))`)
 			}
 			g.P(typeName, `    } else {`)
-			if fdata.ElementKind != "" {
-				g.P(typeName, `      fmt.Fprintf(&sb, " %d", v.`, fdata.Name, `ItemAt(i))`)
+			if fdata.SliceKind == "basic" {
+				g.P(typeName, `      fmt.Fprintf(&sb, " %d", v.`, fdata.FieldName, `ItemAt(i))`)
 			} else {
-				g.P(typeName, `      fmt.Fprintf(&sb, " {%v}", v.`, fdata.Name, `ItemAt(i))`)
+				g.P(typeName, `      fmt.Fprintf(&sb, " {%v}", v.`, fdata.FieldName, `ItemAt(i))`)
 			}
 			g.P(typeName, `    }`)
 			g.P(typeName, `  }`)
 			g.P(typeName, `  fmt.Fprintf(&sb, "}")`)
-		case "struct":
-			g.P(typeName, `  fmt.Fprintf(&sb, "`, fdata.Name, `={%v}", v.`, fdata.Name, `())`)
-		default:
-			g.P(typeName, `  fmt.Fprintf(&sb, "`, fdata.Name, `=%d", v.`, fdata.Name, `())`)
 		}
 	}
 	g.P(typeName, "  return sb.String()")
+	g.P(typeName, "}")
+	g.P(typeName)
+	return nil
+}
+
+func (g *Generator) generateCopyMethods(sdata *StructData) error {
+	typeName := sdata.StructName
+	inputStructName := g.prepStructTypeName(sdata, "", "", &inputStructNameOpts)
+	readerReceiver := g.prepStructTypeName(sdata, "", "Reader", &receiverNameOptions)
+	writerReceiver := g.prepStructTypeName(sdata, "", "Writer", &receiverNameOptions)
+
+	if err := g.addImport(typeName, "", "strings"); err != nil {
+		return err
+	}
+	if err := g.addImport(typeName, "", "fmt"); err != nil {
+		return err
+	}
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", readerReceiver, ") CopyTo(x *", inputStructName, ") {")
+	for _, fdata := range sdata.Fields {
+		switch fdata.Kind {
+		case "basic":
+			g.P(typeName, "  x.", fdata.FieldName, " = v.", fdata.FieldName, "()")
+		case "struct":
+			g.P(typeName, "  v.", fdata.FieldName, "().CopyTo(&x.", fdata.FieldName, ")")
+		case "array":
+			g.P(typeName, `  for i := 0; i < v.`, fdata.FieldName, `Len(); i++ {`)
+			if fdata.ArrayKind == "basic" {
+				g.P(typeName, `      x.`, fdata.FieldName, `[i] = v.`, fdata.FieldName, `ItemAt(i)`)
+			} else {
+				g.P(typeName, `      v.`, fdata.FieldName, `ItemAt(i).CopyTo(&x.`, fdata.FieldName, `[i])`)
+			}
+			g.P(typeName, "  }")
+		case "slice":
+			fieldTypeName := g.prepFieldTypeName(sdata, fdata, "", "", &fieldTypeNameOptions{PkgName: true, TypeArgs: true, TypeArgPkgNames: true})
+			g.P(typeName, `  x.`, fdata.FieldName, ` = make([]`, fieldTypeName, `, v.`, fdata.FieldName, `Len())`)
+			g.P(typeName, `  for i := 0; i < v.`, fdata.FieldName, `Len(); i++ {`)
+			if fdata.SliceKind == "basic" {
+				g.P(typeName, `      x.`, fdata.FieldName, `[i] = v.`, fdata.FieldName, `ItemAt(i)`)
+			} else {
+				g.P(typeName, `      v.`, fdata.FieldName, `ItemAt(i).CopyTo(&x.`, fdata.FieldName, `[i])`)
+			}
+			g.P(typeName, `  }`)
+		}
+	}
+	g.P(typeName, "}")
+	g.P(typeName)
+
+	g.P(typeName)
+	g.P(typeName, "func (v ", writerReceiver, ") CopyFrom(x *", inputStructName, ") {")
+	for _, fdata := range sdata.Fields {
+		switch fdata.Kind {
+		case "basic":
+			g.P(typeName, "  v.Set", fdata.FieldName, "(x.", fdata.FieldName, ")")
+		case "struct":
+			g.P(typeName, "  v.", fdata.FieldName, "().Writer().CopyFrom(&x.", fdata.FieldName, ")")
+		case "array":
+			g.P(typeName, `  for i := 0; i < v.`, fdata.FieldName, `Len(); i++ {`)
+			if fdata.ArrayKind == "basic" {
+				g.P(typeName, "  v.Set", fdata.FieldName, "ItemAt(i, x.", fdata.FieldName, "[i])")
+			} else {
+				g.P(typeName, "  v.", fdata.FieldName, "ItemAt(i).Writer().CopyFrom(&x.", fdata.FieldName, "[i])")
+			}
+			g.P(typeName, `  }`)
+		case "slice":
+			g.P(typeName, `  v.Resize`, fdata.FieldName, `(len(x.`, fdata.FieldName, `))`)
+			g.P(typeName, `  for i := 0; i < len(x.`, fdata.FieldName, `); i++ {`)
+			if fdata.SliceKind == "basic" {
+				g.P(typeName, "  v.Set", fdata.FieldName, "ItemAt(i, x.", fdata.FieldName, "[i])")
+			} else {
+				g.P(typeName, "  v.", fdata.FieldName, "ItemAt(i).Writer().CopyFrom(&x.", fdata.FieldName, "[i])")
+			}
+			g.P(typeName, `  }`)
+		}
+	}
 	g.P(typeName, "}")
 	g.P(typeName)
 	return nil

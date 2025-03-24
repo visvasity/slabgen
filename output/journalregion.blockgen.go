@@ -4,40 +4,47 @@ package output
 
 import (
 	"fmt"
-	"github.com/visvasity/blockgen/blockgen"
 	"strings"
+
+	"github.com/visvasity/blockgen/blockgen"
+	input "github.com/visvasity/blockgen/input"
 )
 
 // Reader type defines accessor methods for read-only access.
-type JournalRegion blockgen.BlockBytes
+type JournalRegionReader blockgen.BlockBytes
 
 // Writer type extends the reader with mutable methods.
-type JournalRegionWriter struct{ JournalRegion }
+type JournalRegionWriter struct{ JournalRegionReader }
+
+var structSizeOfJournalRegion = blockgen.SizeFor[input.JournalRegion]()
+var fieldOffsetsOfJournalRegion = blockgen.OffsetsFor[input.JournalRegion](nil)
 
 // BlockBytes returns access to the underlying byte slice.
-func (v JournalRegion) BlockBytes() blockgen.BlockBytes {
+func (v JournalRegionReader) BlockBytes() blockgen.BlockBytes {
 	return blockgen.BlockBytes(v)
 }
 
 // Writer returns the JournalRegion writer for read-write access to it's fields.
-func (v JournalRegion) Writer() JournalRegionWriter {
+func (v JournalRegionReader) Writer() JournalRegionWriter {
 	return JournalRegionWriter{v}
 }
 
 // Reader returns the JournalRegion reader with read-only access to it's fields.
-func (v JournalRegionWriter) Reader() JournalRegion {
-	return v.JournalRegion
+func (v JournalRegionWriter) Reader() JournalRegionReader {
+	return v.JournalRegionReader
 }
 
-func (v JournalRegion) IsZero() bool {
-	return blockgen.IsZero(v[:24])
+// IsZero returns true if all underlying bytes are zero.
+func (v JournalRegionReader) IsZero() bool {
+	return blockgen.IsZero(v[:structSizeOfJournalRegion])
 }
 
+// SetZero sets all underlying bytes to zero.
 func (v JournalRegionWriter) SetZero() {
-	blockgen.SetZero(v.BlockBytes()[:24])
+	blockgen.SetZero(v.BlockBytes()[:structSizeOfJournalRegion])
 }
 
-func (v JournalRegion) String() string {
+func (v JournalRegionReader) String() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "JournalOffset=%d", v.JournalOffset())
 	fmt.Fprintf(&sb, " ")
@@ -47,26 +54,44 @@ func (v JournalRegion) String() string {
 	return sb.String()
 }
 
-func (v JournalRegion) JournalOffset() int64 {
-	return v.BlockBytes().Int64At(0)
+func (v JournalRegionReader) CopyTo(x *input.JournalRegion) {
+	x.JournalOffset = v.JournalOffset()
+	x.FileOffset = v.FileOffset()
+	x.RegionSize = v.RegionSize()
+}
+
+func (v JournalRegionWriter) CopyFrom(x *input.JournalRegion) {
+	v.SetJournalOffset(x.JournalOffset)
+	v.SetFileOffset(x.FileOffset)
+	v.SetRegionSize(x.RegionSize)
+}
+
+func (v JournalRegionReader) JournalOffset() int64 {
+	var offset = fieldOffsetsOfJournalRegion[0]
+	return int64(v.BlockBytes().Int64At(offset))
 }
 
 func (v JournalRegionWriter) SetJournalOffset(x int64) {
-	v.BlockBytes().SetInt64At(0, x)
+	var offset = fieldOffsetsOfJournalRegion[0]
+	v.BlockBytes().SetInt64At(offset, int64(x))
 }
 
-func (v JournalRegion) FileOffset() int64 {
-	return v.BlockBytes().Int64At(8)
+func (v JournalRegionReader) FileOffset() int64 {
+	var offset = fieldOffsetsOfJournalRegion[1]
+	return int64(v.BlockBytes().Int64At(offset))
 }
 
 func (v JournalRegionWriter) SetFileOffset(x int64) {
-	v.BlockBytes().SetInt64At(8, x)
+	var offset = fieldOffsetsOfJournalRegion[1]
+	v.BlockBytes().SetInt64At(offset, int64(x))
 }
 
-func (v JournalRegion) RegionSize() int64 {
-	return v.BlockBytes().Int64At(16)
+func (v JournalRegionReader) RegionSize() int64 {
+	var offset = fieldOffsetsOfJournalRegion[2]
+	return int64(v.BlockBytes().Int64At(offset))
 }
 
 func (v JournalRegionWriter) SetRegionSize(x int64) {
-	v.BlockBytes().SetInt64At(16, x)
+	var offset = fieldOffsetsOfJournalRegion[2]
+	v.BlockBytes().SetInt64At(offset, int64(x))
 }
