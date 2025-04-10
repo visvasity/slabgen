@@ -2,13 +2,13 @@
 
 package input
 
-import "github.com/visvasity/blockgen/blockgen"
+import "github.com/visvasity/slabgen/slabs"
 
-type TestPair[T blockgen.Number] struct {
+type TestPair[T slabs.Number] struct {
 	First, Second T
 }
 
-type TestMixedPair[T blockgen.Number, S blockgen.Struct] struct {
+type TestMixedPair[T slabs.Number, S slabs.Struct] struct {
 	Number T
 	Struct S
 }
@@ -29,7 +29,7 @@ type TestStruct struct{ Int64 int64 }
 
 type TestStructWithSlice struct{ Int64Slice []int64 }
 
-type TestGenericBlock[T1 blockgen.Number, S1 blockgen.Struct] struct {
+type TestGenericBlock[T1 slabs.Number, S1 slabs.Struct] struct {
 	/////////////////////
 	// Basic type fields
 	/////////////////////
@@ -126,34 +126,34 @@ type TestGenericBlock[T1 blockgen.Number, S1 blockgen.Struct] struct {
 
 /////////////////////////////////////////////////////////////////////////////
 
-type TestFinalSliceKind1[T1 blockgen.Number, S1 blockgen.Struct] struct {
+type TestFinalSliceKind1[T1 slabs.Number, S1 slabs.Struct] struct {
 	FinalSlice []int8
 }
 
-type TestFinalSliceKind2[T1 blockgen.Number, S1 blockgen.Struct] struct {
+type TestFinalSliceKind2[T1 slabs.Number, S1 slabs.Struct] struct {
 	FinalSlice []TestNamedInt64
 }
 
-type TestFinalSliceKind3[T1 blockgen.Number, S1 blockgen.Struct] struct {
+type TestFinalSliceKind3[T1 slabs.Number, S1 slabs.Struct] struct {
 	FinalSlice []TestStruct
 }
 
-type TestFinalSliceKind4[T1 blockgen.Number, S1 blockgen.Struct] struct {
+type TestFinalSliceKind4[T1 slabs.Number, S1 slabs.Struct] struct {
 	FinalSlice []S1
 }
 
-type TestFinalSliceKind5[T1 blockgen.Number, S1 blockgen.Struct] struct {
+type TestFinalSliceKind5[T1 slabs.Number, S1 slabs.Struct] struct {
 	FinalSlice []T1
 }
 
-type TestFinalSliceKind6[T1 blockgen.Number, S1 blockgen.Struct] struct {
+type TestFinalSliceKind6[T1 slabs.Number, S1 slabs.Struct] struct {
 	FinalSlice []TestPair[int8]
 }
 
-type TestFinalSliceKind7[T1 blockgen.Number, S1 blockgen.Struct] struct {
+type TestFinalSliceKind7[T1 slabs.Number, S1 slabs.Struct] struct {
 	FinalSlice []TestPair[T1]
 }
 
-type TestFinalSliceKind8[T1 blockgen.Number, S1 blockgen.Struct] struct {
+type TestFinalSliceKind8[T1 slabs.Number, S1 slabs.Struct] struct {
 	FinalSlice []TestMixedPair[uint16, S1]
 }

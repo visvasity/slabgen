@@ -13,7 +13,7 @@ func TestChecker(t *testing.T) {
 	cfg := &packages.Config{
 		Mode: packages.LoadTypes | packages.NeedTypesInfo | packages.NeedImports,
 	}
-	pkgs, err := packages.Load(cfg, "github.com/visvasity/blockgen/input")
+	pkgs, err := packages.Load(cfg, "github.com/visvasity/slabgen/input")
 	if err != nil {
 		t.Fatal(err)
 	}

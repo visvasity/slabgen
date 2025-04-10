@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/visvasity/blockgen/input"
-	"github.com/visvasity/blockgen/output"
+	"github.com/visvasity/slabgen/input"
+	"github.com/visvasity/slabgen/output"
 )
 
 func TestSuperBlock(t *testing.T) {

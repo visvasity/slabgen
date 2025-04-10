@@ -8,7 +8,7 @@ export GOTESTFLAGS ?=
 .PHONY: all
 all:
 	$(GO) build ./input
-	rm -rf ./output/*.blockgen.go
+	rm -rf ./output/*.slab.go
 	$(GO) run . -inpkg=./input -outpkg=output -outdir=./output TestFinalSliceKind1 TestFinalSliceKind2 TestFinalSliceKind3 TestFinalSliceKind4 TestFinalSliceKind5 TestFinalSliceKind6 TestFinalSliceKind7 TestFinalSliceKind8
 	$(GO) run . -inpkg=./input -outpkg=output -outdir=./output TestGenericBlock TestPair TestMixedPair
 	$(GO) run . -inpkg=./input -outpkg=output -outdir=./output SuperBlock

@@ -1,6 +1,6 @@
 // Copyright (c) 2025 Visvasity LLC
 
-package blockgen
+package slabutil
 
 type SortHelper struct {
 	LenFunc     func() int

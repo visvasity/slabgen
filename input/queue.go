@@ -3,7 +3,7 @@
 package input
 
 import (
-	"github.com/visvasity/blockgen/blockgen"
+	"github.com/visvasity/slabgen/slabs"
 	"github.com/visvasity/storage"
 )
 
@@ -15,7 +15,7 @@ type HeaderBlock struct {
 	ValueSizeCap int64
 }
 
-type DataBlock[T blockgen.Struct] struct {
+type DataBlock[T slabs.Struct] struct {
 	NextLBA storage.LBA
 
 	ValuesSlice []T

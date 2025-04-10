@@ -1,37 +1,15 @@
 // Copyright (c) 2025 Visvasity LLC
 
-package blockgen
+package slabutil
 
 import (
 	"encoding/binary"
 	"fmt"
 	"reflect"
 	"sync"
+
+	"github.com/visvasity/slabgen/slabs"
 )
-
-type Number interface {
-	~int8 | ~int16 | ~int32 | ~int64 | ~uint8 | ~uint16 | ~uint32 | ~uint64 // TODO: ~float32 | ~float64
-}
-
-type Struct interface {
-}
-
-type Reader[S Struct, W any] interface {
-	~[]byte
-	BlockBytes() BlockBytes
-
-	Writer() W
-
-	CopyTo(*S)
-}
-
-type Writer[S Struct, R any] interface {
-	BlockBytes() BlockBytes
-
-	Reader() R
-
-	CopyFrom(*S)
-}
 
 var SizeOfInt = int(reflect.TypeFor[int]().Size())
 var SizeOfSlice = int(reflect.TypeOf([]int{}).Size())
@@ -83,7 +61,7 @@ func ElemSizeFor[T any]() int {
 	panic(fmt.Sprintf("input type %T is not a slice or an array", v))
 }
 
-func NumberAt[T Number](v BlockBytes, offset int) T {
+func NumberAt[T slabs.Number](v []byte, offset int) T {
 	var x T
 	if _, err := binary.Decode([]byte(v[offset:]), binary.BigEndian, &x); err != nil {
 		panic(err)
@@ -91,7 +69,7 @@ func NumberAt[T Number](v BlockBytes, offset int) T {
 	return x
 }
 
-func SetNumberAt[T Number](v BlockBytes, offset int, x T) {
+func SetNumberAt[T slabs.Number](v []byte, offset int, x T) {
 	if _, err := binary.Encode([]byte(v[offset:]), binary.BigEndian, x); err != nil {
 		panic(err)
 	}

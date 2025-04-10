@@ -435,7 +435,7 @@ func isSliceType(ftype types.Type) bool {
 func isStructTypeParam(tparam *types.TypeParam) bool {
 	if named, ok := tparam.Constraint().(*types.Named); ok {
 		tn := named.Obj()
-		if tn.Pkg() != nil && tn.Pkg().Path() == "github.com/visvasity/blockgen/blockgen" && tn.Name() == "Struct" {
+		if tn.Pkg() != nil && tn.Pkg().Path() == "github.com/visvasity/slabgen/slabs" && tn.Name() == "Struct" {
 			return true
 		}
 	}
@@ -445,7 +445,7 @@ func isStructTypeParam(tparam *types.TypeParam) bool {
 func isNumberTypeParam(tparam *types.TypeParam) bool {
 	if named, ok := tparam.Constraint().(*types.Named); ok {
 		tn := named.Obj()
-		if tn.Pkg() != nil && tn.Pkg().Path() == "github.com/visvasity/blockgen/blockgen" && tn.Name() == "Number" {
+		if tn.Pkg() != nil && tn.Pkg().Path() == "github.com/visvasity/slabgen/slabs" && tn.Name() == "Number" {
 			return true
 		}
 	}

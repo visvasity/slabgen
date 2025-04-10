@@ -1,4 +1,4 @@
-module github.com/visvasity/blockgen
+module github.com/visvasity/slabgen
 
 go 1.23.2
 
